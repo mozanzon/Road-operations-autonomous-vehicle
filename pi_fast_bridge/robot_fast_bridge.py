@@ -86,7 +86,6 @@ class ArduinoLink:
         self.latest_raw = ""
         self.connected_port = None
         self.lock = threading.Lock()
-        self.partial_line = ""
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -100,17 +99,9 @@ class ArduinoLink:
         for port in self.ports:
             try:
                 logger.info("Trying Arduino port %s", port)
-                self.serial = serial.Serial(
-                    port,
-                    self.baudrate,
-                    timeout=0,
-                    write_timeout=0.05,
-                    inter_byte_timeout=0,
-                )
-                self.serial.reset_input_buffer()
-                self.serial.reset_output_buffer()
+                self.serial = serial.Serial(port, self.baudrate, timeout=0.02, write_timeout=0.05)
                 self.connected_port = port
-                time.sleep(0.25)
+                time.sleep(1.5)
                 logger.info("Connected Arduino on %s", port)
                 return
             except Exception as exc:
@@ -126,29 +117,17 @@ class ArduinoLink:
                 continue
 
             try:
-                waiting = self.serial.in_waiting
-                if waiting <= 0:
-                    time.sleep(0.001)
-                    continue
-                raw = self.serial.read(waiting)
+                raw = self.serial.readline()
                 if not raw:
-                    time.sleep(0.001)
                     continue
-                text = raw.decode("utf-8", errors="ignore")
-                lines = (self.partial_line + text).splitlines()
-                if text and text[-1] not in "\r\n":
-                    self.partial_line = lines.pop() if lines else (self.partial_line + text)
-                else:
-                    self.partial_line = ""
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parsed = parse_arduino_line(line)
-                    with self.lock:
-                        self.latest_raw = line
-                        if parsed and parsed.get("type") == "status":
-                            self.latest_sensor = parsed
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+                parsed = parse_arduino_line(line)
+                with self.lock:
+                    self.latest_raw = line
+                    if parsed and parsed.get("type") == "status":
+                        self.latest_sensor = parsed
             except Exception as exc:
                 logger.warning("Arduino read failed, reconnecting: %s", exc)
                 try:
@@ -157,14 +136,12 @@ class ArduinoLink:
                     pass
                 self.serial = None
                 self.connected_port = None
-                self.partial_line = ""
 
     def send(self, command):
         if self.serial is None:
             return False
         try:
             self.serial.write((command.strip() + "\n").encode("utf-8"))
-            self.serial.flush()
             return True
         except Exception as exc:
             logger.warning("Arduino write failed: %s", exc)
@@ -285,9 +262,6 @@ class RobotBridge:
         if msg_type == "raw":
             return str(data.get("command", "")).strip()
 
-        if msg_type == "velocity":
-            return self.velocity_to_command(data)
-
         if msg_type == "movement":
             action = str(data.get("action", "")).lower()
             speed = int(max(0, min(255, int(data.get("speed", 160)))))
@@ -310,17 +284,6 @@ class RobotBridge:
         if msg_type == "turn_speed":
             return f"TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"
 
-        if msg_type == "painting":
-            return self.painting_to_command(data)
-
-        if msg_type in {"mode", "paint_motion_mode", "pause_path", "stop_path", "reset_path", "scripted_path_pause", "scripted_path_reset"}:
-            if msg_type in {"stop_path", "reset_path"}:
-                return "S"
-            return None
-
-        if msg_type in {"start_path", "scripted_path_start"}:
-            return None
-
         if msg_type == "plot":
             mode = str(data.get("mode", "")).lower()
             if mode == "cont":
@@ -341,40 +304,6 @@ class RobotBridge:
                 return f"PLOT TICKS {int(max(0, int(data.get('ticks', 0))))}"
 
         return None
-
-    def velocity_to_command(self, data):
-        linear = float(data.get("linear", 0) or 0)
-        angular = float(data.get("angular", 0) or 0)
-        speed_ratio = max(abs(linear), abs(angular))
-
-        if speed_ratio < 0.05:
-            return "S"
-
-        commanded_speed = int(max(80, min(255, round(speed_ratio * 255))))
-        self.arduino.send(f"SPEED {commanded_speed}")
-
-        if abs(linear) >= abs(angular):
-            return "W" if linear > 0 else "X"
-
-        return "A" if angular > 0 else "D"
-
-    def painting_to_command(self, data):
-        active = bool(data.get("active", False))
-        mode = str(data.get("mode", "solid")).lower()
-
-        if not active:
-            return "PLOT OFF"
-
-        if mode == "dashed":
-            dash_m = max(0.01, float(data.get("dashLength", 0.5) or 0.5))
-            gap_m = max(0.01, float(data.get("gapLength", 0.3) or 0.3))
-            self.arduino.send(f"PLOT DASH DIST {dash_m:.3f} {gap_m:.3f}")
-            return "PLOT DASH"
-
-        target_distance = max(0.0, float(data.get("targetDistance", 0) or 0))
-        if target_distance > 0:
-            self.arduino.send(f"PLOT DIST {target_distance:.3f}")
-        return "PLOT CONT"
 
     async def broadcast_loop(self):
         while True:
@@ -430,10 +359,10 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--camera", default="0")
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=360)
-    parser.add_argument("--fps", type=int, default=12)
-    parser.add_argument("--jpeg-quality", type=int, default=65)
+    parser.add_argument("--width", type=int, default=320)
+    parser.add_argument("--height", type=int, default=180)
+    parser.add_argument("--fps", type=int, default=6)
+    parser.add_argument("--jpeg-quality", type=int, default=32)
     args = parser.parse_args()
 
     asyncio.run(RobotBridge(args).run())
