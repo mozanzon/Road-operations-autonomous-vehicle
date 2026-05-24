@@ -42,7 +42,7 @@ export interface PIDSet { kp: number; ki: number; kd: number; }
 export interface PaintingState {
   active: boolean; mode: 'solid' | 'dashed';
   dashLength: number; gapLength: number;
-  color: string; lineWidth: number;
+  color: string;
   targetDistance: number; distancePainted: number;
   status: 'active' | 'idle' | 'error';
 }
@@ -61,6 +61,12 @@ export interface BridgeStats {
   loop_fps?: number;
   stream_fps?: number;
   jpeg_quality?: number;
+  active_mode?: RobotMode;
+  path_status?: PathExecStatus;
+  current_target_idx?: number;
+  scripted_step_idx?: number;
+  last_command?: string;
+  autonomous_note?: string;
 }
 
 export interface ScriptedMove {
@@ -68,6 +74,15 @@ export interface ScriptedMove {
   distance: number;
   movementType: ScriptMovementType;
   speed: number;
+}
+
+export interface ScriptedMoveStep extends ScriptedMove {
+  id: string;
+}
+
+export interface RoutePoint {
+  lat: number;
+  lng: number;
 }
 
 export interface ReportEvent {
@@ -96,6 +111,7 @@ export interface RobotContextType {
   modelStatus: 'idle' | 'loading' | 'ready' | 'running' | 'error';
   selectedModelPath: string;
   setSelectedModelPath: (value: string) => void;
+  setModelStatus: (status: 'idle' | 'loading' | 'ready' | 'running' | 'error') => void;
   tomTomApiKey: string;
   setTomTomApiKey: (value: string) => void;
   imu: IMUData; gps: GPSData; encoders: EncoderData;
@@ -112,11 +128,19 @@ export interface RobotContextType {
   deleteWaypoint: (id: string) => void;
   importWaypoints: (wps: Waypoint[]) => void;
   pathExecStatus: PathExecStatus;
-  startPath: () => void; pausePath: () => void; stopPath: () => void; resetPath: () => void;
+  startPath: (route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => void; pausePath: () => void; stopPath: () => void; resetPath: () => void;
   currentTargetIdx: number;
+  scriptedStepIdx: number;
   scriptedMove: ScriptedMove;
   setScriptedMove: (move: Partial<ScriptedMove>) => void;
+  scriptedMoves: ScriptedMoveStep[];
+  addScriptedMove: () => void;
+  removeScriptedMove: (id: string) => void;
+  moveScriptedMove: (id: string, direction: 'up' | 'down') => void;
   startScriptedMove: () => void; pauseScriptedMove: () => void; resetScriptedMove: () => void;
+  manualSpeed: number; setManualSpeed: (v: number) => void;
+  semiSpeed: number; setSemiSpeed: (v: number) => void;
+  autonomousMaxSpeed: number; setAutonomousMaxSpeed: (v: number) => void;
   painting: PaintingState;
   setPainting: (p: Partial<PaintingState>) => void;
   pidLinear: PIDSet; setPidLinear: (v: PIDSet) => void;
@@ -181,10 +205,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   const [pathExecStatus, setPathExecStatus] = useState<PathExecStatus>('idle');
   const [currentTargetIdx, setCurrentTargetIdx] = useState(0);
+  const [scriptedStepIdx, setScriptedStepIdx] = useState(0);
+  const [manualSpeed, setManualSpeed] = useState(0.5);
+  const [semiSpeed, setSemiSpeed] = useState(0.5);
+  const [autonomousMaxSpeed, setAutonomousMaxSpeed] = useState(0.5);
   const [scriptedMoveState, setScriptedMoveState] = useState<ScriptedMove>({ direction: 'forward', distance: 1, movementType: 'straight', speed: 0.5 });
+  const [scriptedMoves, setScriptedMoves] = useState<ScriptedMoveStep[]>([]);
   const [painting, setPaintingState] = useState<PaintingState>({
     active: false, mode: 'solid', dashLength: 0.5, gapLength: 0.3,
-    color: '#ffffff', lineWidth: 10, targetDistance: 100, distancePainted: 0, status: 'idle',
+    color: '#ffffff', targetDistance: 100, distancePainted: 0, status: 'idle',
   });
   const [pidLinear, setPidLinear] = useState<PIDSet>({ kp: 0, ki: 0, kd: 0 });
   const [pidAngular, setPidAngular] = useState<PIDSet>({ kp: 0, ki: 0, kd: 0 });
@@ -288,11 +317,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     });
     setImuLive(hasAny(arduino, ['roll', 'pitch', 'yaw', 'heading', 'compass']));
 
-    const leftTicks = numberFrom(arduino, ['leftTicks', 'left_ticks', 'encoder_left', 'left'], 0);
-    const rightTicks = numberFrom(arduino, ['rightTicks', 'right_ticks', 'encoder_right', 'right'], 0);
-    const leftRPM = numberFrom(arduino, ['leftRPM', 'left_rpm'], 0);
-    const rightRPM = numberFrom(arduino, ['rightRPM', 'right_rpm'], 0);
-    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity'], speed);
+    const leftTicks = numberFrom(arduino, ['leftTicks', 'left_ticks', 'encoder_left', 'left', 'e1'], 0);
+    const rightTicks = numberFrom(arduino, ['rightTicks', 'right_ticks', 'encoder_right', 'right', 'e2'], 0);
+    const leftRPM = numberFrom(arduino, ['leftRPM', 'left_rpm', 'de1'], 0);
+    const rightRPM = numberFrom(arduino, ['rightRPM', 'right_rpm', 'de2'], 0);
+    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed'], speed);
     const odometryError = numberFrom(arduino, ['odometryError', 'odometry_error', 'odom_error'], 0);
     setEncoders((prev) => ({
       leftTicks,
@@ -304,11 +333,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       errorHistory: [...prev.errorHistory.slice(-59), odometryError],
       timestamp: now,
     }));
-    setEncodersLive(hasAny(arduino, ['leftTicks', 'left_ticks', 'rightTicks', 'right_ticks', 'leftRPM', 'rightRPM', 'linearVelocity']));
+    setEncodersLive(hasAny(arduino, ['leftTicks', 'left_ticks', 'rightTicks', 'right_ticks', 'leftRPM', 'rightRPM', 'linearVelocity', 'e1', 'e2', 'de1', 'de2']));
     setBattery(numberFrom(arduino, ['battery', 'battery_percent', 'batteryLevel'], battery));
     setHostname(stringFrom(arduino, ['hostname', 'host'], hostname));
-    setTotalDistance(numberFrom(arduino, ['totalDistance', 'total_distance'], totalDistance));
-    setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance'], segmentDistance));
+    setTotalDistance(numberFrom(arduino, ['totalDistance', 'total_distance'], numberFrom(arduino, ['left_m', 'right_m'], totalDistance)));
+    setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance', 'plot_target_m'], segmentDistance));
   }, [battery, hostname, segmentDistance, totalDistance]);
 
   const connect = useCallback(() => {
@@ -332,6 +361,9 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       if (payload.stats) {
         setBridgeStats(payload.stats);
         setCameraLive(Boolean(payload.stats.camera_connected || payload.stats.camera_has_frame));
+        if (payload.stats.path_status) setPathExecStatus(payload.stats.path_status);
+        if (typeof payload.stats.current_target_idx === 'number') setCurrentTargetIdx(payload.stats.current_target_idx);
+        if (typeof payload.stats.scripted_step_idx === 'number') setScriptedStepIdx(payload.stats.scripted_step_idx);
       }
       if (payload.arduino) handleArduinoPayload(payload.arduino);
       if (payload.frame) {
@@ -378,12 +410,18 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setWaypoints(wps.map((wp, order) => ({ ...wp, order, id: wp.id || `wp-${Date.now()}-${order}` })));
   }, []);
 
-  const startPath = useCallback(() => {
+  const startPath = useCallback((route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => {
     setPathExecStatus('running');
     setCurrentTargetIdx(0);
-    sendCommand('start_path', { waypoints });
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${waypoints.length} waypoints` });
-  }, [appendReportEvent, sendCommand, waypoints]);
+    const routePoints = route?.points ?? waypoints.map(({ lat, lng }) => ({ lat, lng }));
+    sendCommand('start_path', {
+      waypoints,
+      route_points: routePoints,
+      route_source: route?.source ?? 'direct',
+      max_speed: route?.maxSpeed ?? autonomousMaxSpeed,
+    });
+    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${route?.maxSpeed ?? autonomousMaxSpeed}m/s` });
+  }, [appendReportEvent, autonomousMaxSpeed, sendCommand, waypoints]);
 
   const pausePath = useCallback(() => {
     setPathExecStatus('paused');
@@ -406,20 +444,45 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setScriptedMoveState((prev) => ({ ...prev, ...move }));
   }, []);
 
+  const addScriptedMove = useCallback(() => {
+    setScriptedMoves((prev) => [
+      ...prev,
+      { ...scriptedMoveState, speed: scriptedMoveState.speed || semiSpeed, id: `step-${Date.now()}-${prev.length}` },
+    ]);
+  }, [scriptedMoveState, semiSpeed]);
+
+  const removeScriptedMove = useCallback((id: string) => {
+    setScriptedMoves((prev) => prev.filter((step) => step.id !== id));
+  }, []);
+
+  const moveScriptedMove = useCallback((id: string, direction: 'up' | 'down') => {
+    setScriptedMoves((prev) => {
+      const next = [...prev];
+      const index = next.findIndex((step) => step.id === id);
+      const target = direction === 'up' ? index - 1 : index + 1;
+      if (index < 0 || target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }, []);
+
   const startScriptedMove = useCallback(() => {
+    const steps = scriptedMoves.length ? scriptedMoves : [{ ...scriptedMoveState, id: `step-${Date.now()}-single` }];
     setPathExecStatus('running');
-    sendCommand('scripted_move_start', scriptedMoveState);
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started scripted move', details: `${scriptedMoveState.direction} ${scriptedMoveState.distance}m at ${scriptedMoveState.speed}m/s` });
-  }, [appendReportEvent, scriptedMoveState, sendCommand]);
+    setScriptedStepIdx(0);
+    sendCommand('scripted_path_start', { steps });
+    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started scripted path', details: `${steps.length} movement step${steps.length === 1 ? '' : 's'}` });
+  }, [appendReportEvent, scriptedMoveState, scriptedMoves, sendCommand]);
 
   const pauseScriptedMove = useCallback(() => {
     setPathExecStatus('paused');
-    sendCommand('scripted_move_pause');
+    sendCommand('scripted_path_pause');
   }, [sendCommand]);
 
   const resetScriptedMove = useCallback(() => {
     setPathExecStatus('idle');
-    sendCommand('scripted_move_reset');
+    setScriptedStepIdx(0);
+    sendCommand('scripted_path_reset');
   }, [sendCommand]);
 
   const setPainting = useCallback((next: Partial<PaintingState>) => {
@@ -480,7 +543,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     <RobotContext.Provider value={{
       connectionStatus, connectionIp, setConnectionIp, connect, disconnect,
       hostname, uptime, battery, latency, bridgeStats, cameraFrame, cameraLive, modelStatus,
-      selectedModelPath: selectedModelPathState, setSelectedModelPath,
+      selectedModelPath: selectedModelPathState, setSelectedModelPath, setModelStatus,
       tomTomApiKey: tomTomApiKeyState, setTomTomApiKey,
       imu, gps, encoders, imuLive, gpsLive, encodersLive,
       mode, setMode, motionPaintMode, setMotionPaintMode, gpsFix: gps.fix, totalDistance, segmentDistance,
@@ -488,8 +551,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       crackCount: detections.filter((d) => d.type === 'crack').length,
       detections, addDetection,
       waypoints, addWaypoint, updateWaypoint, deleteWaypoint, importWaypoints,
-      pathExecStatus, startPath, pausePath, stopPath, resetPath, currentTargetIdx,
-      scriptedMove: scriptedMoveState, setScriptedMove, startScriptedMove, pauseScriptedMove, resetScriptedMove,
+      pathExecStatus, startPath, pausePath, stopPath, resetPath, currentTargetIdx, scriptedStepIdx,
+      scriptedMove: scriptedMoveState, setScriptedMove,
+      scriptedMoves, addScriptedMove, removeScriptedMove, moveScriptedMove,
+      startScriptedMove, pauseScriptedMove, resetScriptedMove,
+      manualSpeed, setManualSpeed, semiSpeed, setSemiSpeed, autonomousMaxSpeed, setAutonomousMaxSpeed,
       painting, setPainting,
       pidLinear, setPidLinear, pidAngular, setPidAngular, pidHistory,
       joystickOutput, setJoystickOutput: sendVelocity, sendVelocity, sendCommand,

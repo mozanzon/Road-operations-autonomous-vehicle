@@ -875,12 +875,12 @@ void handleCommand(String cmd) {
   cmd.toUpperCase();
 
   // Plotting control
-  if (cmd == "P0") {
+  if (cmd == "P0" || cmd == "PLOT CONT" || cmd == "CONT") {
     plottingMode = PLOT_CONTINUOUS;
     Serial.println("Plotting mode: CONTINUOUS");
     return;
   }
-  if (cmd == "P1") {
+  if (cmd == "P1" || cmd == "PLOT DASH" || cmd == "DASH") {
     plottingMode = PLOT_DASHED;
     lastPlottingToggle = millis();
     plottingMotorsOn = true;
@@ -888,13 +888,25 @@ void handleCommand(String cmd) {
     return;
   }
 
+  if (cmd == "PLOT OFF") {
+    setPlotterOn(false);
+    Serial.println("Plotting mode: OFF");
+    return;
+  }
+
   // SPRAY_DASH <on_cm> <off_cm>
-  if (cmd.startsWith("SPRAY_DASH ")) {
+  if (cmd.startsWith("SPRAY_DASH ") || cmd.startsWith("PLOT DASH DIST ")) {
     int firstSpace = cmd.indexOf(' ');
+    if (cmd.startsWith("PLOT DASH DIST ")) {
+      firstSpace = cmd.indexOf(' ', cmd.indexOf(' ', cmd.indexOf(' ') + 1) + 1);
+    }
     int secondSpace = cmd.indexOf(' ', firstSpace + 1);
     if (firstSpace > 0 && secondSpace > 0) {
-      sprayOnDistanceCm = cmd.substring(firstSpace + 1, secondSpace).toFloat();
-      sprayOffDistanceCm = cmd.substring(secondSpace + 1).toFloat();
+      float onValue = cmd.substring(firstSpace + 1, secondSpace).toFloat();
+      float offValue = cmd.substring(secondSpace + 1).toFloat();
+      bool metersInput = cmd.startsWith("PLOT DASH DIST ");
+      sprayOnDistanceCm = metersInput ? onValue * 100.0 : onValue;
+      sprayOffDistanceCm = metersInput ? offValue * 100.0 : offValue;
       plottingMode = PLOT_DISTANCE_DASHED;
       
       noInterrupts();

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Wifi, Gamepad2, FileBarChart2, Settings, Menu, X, Bot, PanelLeftClose, PanelLeftOpen
+  Wifi, Gamepad2, FileBarChart2, Settings, Info, Menu, X, Bot, PanelLeftClose, PanelLeftOpen
 } from 'lucide-react';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { RobotProvider, useRobot } from './context/RobotContext';
@@ -9,14 +9,16 @@ import { ConnectionTab } from './components/tabs/ConnectionTab';
 import { ControlTab } from './components/tabs/ControlTab';
 import { ReportingTab } from './components/tabs/ReportingTab';
 import { PreferencesTab } from './components/tabs/PreferencesTab';
+import { AboutTab } from './components/tabs/AboutTab';
 
-type TabId = 'connection' | 'control' | 'reporting' | 'preferences';
+type TabId = 'connection' | 'control' | 'reporting' | 'preferences' | 'about';
 
 const TABS: { id: TabId; label: string; shortLabel: string; Icon: React.ComponentType<any> }[] = [
   { id: 'connection', label: 'Connection', shortLabel: 'CONN', Icon: Wifi },
   { id: 'control', label: 'Operations', shortLabel: 'OPS', Icon: Gamepad2 },
   { id: 'reporting', label: 'Reporting', shortLabel: 'REPT', Icon: FileBarChart2 },
   { id: 'preferences', label: 'Preferences', shortLabel: 'PREF', Icon: Settings },
+  { id: 'about', label: 'About', shortLabel: 'INFO', Icon: Info },
 ];
 
 function StatusDot() {
@@ -181,6 +183,7 @@ function AppContent() {
             {activeTab === 'control' && <ControlTab />}
             {activeTab === 'reporting' && <ReportingTab />}
             {activeTab === 'preferences' && <PreferencesTab />}
+            {activeTab === 'about' && <AboutTab />}
           </div>
         </main>
       </div>

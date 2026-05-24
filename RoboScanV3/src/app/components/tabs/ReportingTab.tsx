@@ -148,7 +148,7 @@ export function ReportingTab() {
         </div>
         {filteredEvents.length === 0 && (
           <div className="py-10 text-center text-xs font-mono text-slate-500">
-            No real or test report events recorded yet. Use Record reading or Test application in Operations.
+            No real or test report events recorded yet. Use Record reading, Testing camera, or Inject sample in Operations.
           </div>
         )}
       </div>

@@ -68,7 +68,7 @@ const float ROBOT_TRACK_WIDTH_M = 0.50;
 const float TURN_ANGLE_DEG = 90.0;
 const float HEADING_TOLERANCE_DEG = 2.5;
 const unsigned long TURN_TIMEOUT_MS = 10000;
-const unsigned long TELEMETRY_INTERVAL_MS = 100;
+const unsigned long TELEMETRY_INTERVAL_MS = 50;
 
 const int MIN_TURN_PWM = 45;
 const int DEFAULT_DRIVE_SPEED = 160;
@@ -113,6 +113,7 @@ long lastSpeedRightTicks = 0;
 long lastSpeedLeftDelta = 0;
 long lastSpeedRightDelta = 0;
 float measuredSpeedMps = 0.0;
+String serialCommandBuffer = "";
 
 const float DRIVE_HEADING_KP = 1.0;
 const float DRIVE_ENCODER_KP = 0.025;
@@ -448,11 +449,28 @@ void printStatusIfDue() {
   }
 }
 
-bool abortTurnCommandReceived() {
-  if (Serial.available() == 0) return false;
+bool readSerialCommand(String &cmd) {
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      cmd = serialCommandBuffer;
+      serialCommandBuffer = "";
+      cmd.trim();
+      return cmd.length() > 0;
+    }
+    serialCommandBuffer += ch;
+    if (serialCommandBuffer.length() > 120) {
+      serialCommandBuffer = "";
+    }
+  }
+  return false;
+}
 
-  String cmd = Serial.readStringUntil('\n');
-  cmd.trim();
+bool abortTurnCommandReceived() {
+  String cmd;
+  if (!readSerialCommand(cmd)) return false;
+
   cmd.toUpperCase();
 
   if (cmd == "S" || cmd == "STOP") {
@@ -661,7 +679,7 @@ void handleCommand(String cmd) {
 
 void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
-  Serial.setTimeout(100);
+  serialCommandBuffer.reserve(128);
 
   pinMode(M1_RPWM, OUTPUT);
   pinMode(M1_LPWM, OUTPUT);
@@ -710,7 +728,8 @@ void loop() {
   updatePlotter();
   printStatusIfDue();
 
-  if (Serial.available() > 0) {
-    handleCommand(Serial.readStringUntil('\n'));
+  String cmd;
+  if (readSerialCommand(cmd)) {
+    handleCommand(cmd);
   }
 }
