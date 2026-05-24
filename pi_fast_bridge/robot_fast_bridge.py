@@ -279,62 +279,70 @@ class RobotBridge:
         except json.JSONDecodeError:
             return
 
-        command = self.to_arduino_command(data)
-        if not command:
+        commands = self.to_arduino_commands(data)
+        if not commands:
             return
 
-        sent = self.arduino.send(command)
-        self.command_history.append({"command": command, "sent": sent, "time": time.time()})
-        logger.info("command %s sent=%s", command, sent)
+        for command in commands:
+            sent = self.arduino.send(command)
+            self.command_history.append({"command": command, "sent": sent, "time": time.time()})
+            logger.info("command %s sent=%s", command, sent)
 
-    def to_arduino_command(self, data):
+    def to_arduino_commands(self, data):
         msg_type = data.get("type")
 
         if msg_type == "raw":
-            return str(data.get("command", "")).strip()
+            command = str(data.get("command", "")).strip()
+            return [command] if command else []
 
         if msg_type == "movement":
             action = str(data.get("action", "")).lower()
-            speed = int(max(0, min(255, int(data.get("speed", 160)))))
-            return {
+            movement = {
                 "forward": "W",
                 "backward": "X",
                 "left": "A",
                 "right": "D",
             }.get(action)
+            if not movement:
+                return []
+            if "speed" not in data:
+                return [movement]
+            speed = int(max(0, min(255, int(data.get("speed", 160)))))
+            speed_command = f"TURN SPEED {speed}" if action in {"left", "right"} else f"SPEED {speed}"
+            return [speed_command, movement]
 
         if msg_type == "stop":
-            return "S"
+            return ["S"]
 
         if msg_type == "status":
-            return "STATUS"
+            return ["STATUS"]
 
         if msg_type == "speed":
-            return f"SPEED {int(max(0, min(255, int(data.get('speed', 160)))))}"
+            return [f"SPEED {int(max(0, min(255, int(data.get('speed', 160)))))}"]
 
         if msg_type == "turn_speed":
-            return f"TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"
+            return [f"TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"]
 
         if msg_type == "plot":
             mode = str(data.get("mode", "")).lower()
             if mode == "cont":
-                return "PLOT CONT"
+                return ["PLOT CONT"]
             if mode == "dash":
-                return "PLOT DASH"
+                return ["PLOT DASH"]
             if mode == "dash_dist":
                 dash_m = max(0.01, float(data.get("dash_m", 0.5)))
                 gap_m = max(0.01, float(data.get("gap_m", 0.3)))
-                return f"PLOT DASH DIST {dash_m:.3f} {gap_m:.3f}"
+                return [f"PLOT DASH DIST {dash_m:.3f} {gap_m:.3f}"]
             if mode == "off":
-                return "PLOT OFF"
+                return ["PLOT OFF"]
             if mode == "speed":
-                return f"PLOT SPEED {int(max(0, min(255, int(data.get('speed', 180)))))}"
+                return [f"PLOT SPEED {int(max(0, min(255, int(data.get('speed', 180)))))}"]
             if mode == "dist":
-                return f"PLOT DIST {float(data.get('meters', 0)):.3f}"
+                return [f"PLOT DIST {float(data.get('meters', 0)):.3f}"]
             if mode == "ticks":
-                return f"PLOT TICKS {int(max(0, int(data.get('ticks', 0))))}"
+                return [f"PLOT TICKS {int(max(0, int(data.get('ticks', 0))))}"]
 
-        return None
+        return []
 
     async def broadcast_loop(self):
         while True:

@@ -360,11 +360,13 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (Math.abs(linear) >= Math.abs(angular)) {
-      sendCommand('movement', { action: linear > 0 ? 'forward' : 'backward', speed });
+      sendCommand('speed', { speed });
+      sendCommand('movement', { action: linear > 0 ? 'forward' : 'backward' });
       return;
     }
 
-    sendCommand('movement', { action: angular > 0 ? 'left' : 'right', speed });
+    sendCommand('turn_speed', { speed });
+    sendCommand('movement', { action: angular > 0 ? 'left' : 'right' });
   }, [sendCommand]);
 
   const disconnect = useCallback(() => {
@@ -579,8 +581,12 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setScriptedStepIdx(0);
     const firstStep = steps[0];
     const speed = normalizedSpeedToPwm(firstStep.speed);
-    sendCommand('speed', { speed });
-    sendCommand('movement', { action: firstStep.direction, speed });
+    if (firstStep.direction === 'left' || firstStep.direction === 'right') {
+      sendCommand('turn_speed', { speed });
+    } else {
+      sendCommand('speed', { speed });
+    }
+    sendCommand('movement', { action: firstStep.direction });
     appendReportEvent({ kind: 'command', source: 'robot', label: 'Started scripted path', details: `${steps.length} movement step${steps.length === 1 ? '' : 's'}` });
   }, [appendReportEvent, scriptedMoveState, scriptedMoves, sendCommand]);
 

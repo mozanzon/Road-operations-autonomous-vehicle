@@ -426,7 +426,11 @@ void updatePlotter() {
 
   float segmentTargetM = plotterDashMotorOn ? dashPaintDistanceM : dashGapDistanceM;
   if (segmentTargetM <= 0.0) segmentTargetM = 0.01;
-  if (dashSegmentTravelDistanceM() < segmentTargetM) return;
+  if (dashSegmentTravelDistanceM() < segmentTargetM) {
+    if (plotterDashMotorOn) runPlotterForward(plotterSpeed);
+    else stopPlotterMotor();
+    return;
+  }
 
   plotterDashMotorOn = !plotterDashMotorOn;
   resetDashSegmentStart();
