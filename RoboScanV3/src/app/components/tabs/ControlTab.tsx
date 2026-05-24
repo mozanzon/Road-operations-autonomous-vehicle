@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import {
-  Activity, Bot, Camera, CircleDot, ClipboardList, Gauge, MapPinned, Maximize2,
-  Navigation, Paintbrush, Pause, Play, RadioTower, RotateCcw, Route, Save,
-  Square, TestTube2, X,
+  Activity, AlertTriangle, ArrowDown, ArrowUp, Bot, Camera, CircleDot, ClipboardList, Gauge, MapPinned, Maximize2,
+  Navigation, Paintbrush, Pause, Play, Plus, RadioTower, RotateCcw, Route, Save,
+  Square, TestTube2, Trash2, Video, VideoOff, X,
 } from 'lucide-react';
 import { Detection, drawDetectionOverlay } from '../../lib/yolo';
 import { useRobot, RobotMode } from '../../context/RobotContext';
@@ -21,6 +21,7 @@ type WorkerResponse =
 
 const STREAM_INFERENCE_INTERVAL_MS = 180;
 const EGYPT_CENTER: [number, number] = [30.0444, 31.2357];
+const SOURCE_CAPTURE_WIDTH = 640;
 
 function useCards() {
   const { isDark } = useTheme();
@@ -45,22 +46,59 @@ export function ControlTab() {
   const [confidence, setConfidence] = useState(0.35);
   const [iou, setIou] = useState(0.45);
   const [processingLive, setProcessingLive] = useState(false);
+  const [modelLoaded, setModelLoaded] = useState(false);
   const [modelMessage, setModelMessage] = useState('No ONNX model loaded');
   const [routingStatus, setRoutingStatus] = useState('Straight waypoint line');
   const [routePositions, setRoutePositions] = useState<[number, number][]>([]);
 
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const modalImageRef = useRef<HTMLImageElement | null>(null);
+  const modalVideoRef = useRef<HTMLVideoElement | null>(null);
   const modalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const latestFrameUrlRef = useRef('');
   const requestRef = useRef(0);
   const processingRef = useRef(false);
   const loopRef = useRef<number>();
+  const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const isConnected = robot.connectionStatus === 'connected';
   const sortedWaypoints = useMemo(() => [...robot.waypoints].sort((a, b) => a.order - b.order), [robot.waypoints]);
   const pathPositions = useMemo(() => sortedWaypoints.map((wp) => [wp.lat, wp.lng] as [number, number]), [sortedWaypoints]);
+
+  const clearDetectionCanvases = useCallback(() => {
+    clearCanvas(canvasRef.current);
+    clearCanvas(modalCanvasRef.current);
+  }, []);
+
+  const stopProcessing = useCallback(() => {
+    setProcessingLive(false);
+    processingRef.current = false;
+    requestRef.current += 1;
+    if (loopRef.current) window.clearTimeout(loopRef.current);
+  }, []);
+
+  const captureTestingFrame = useCallback(() => {
+    const source = cameraExpanded ? modalVideoRef.current : videoRef.current;
+    if (!source || source.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !source.videoWidth || !source.videoHeight) return '';
+    const canvas = captureCanvasRef.current ?? document.createElement('canvas');
+    captureCanvasRef.current = canvas;
+    const scale = SOURCE_CAPTURE_WIDTH / source.videoWidth;
+    canvas.width = SOURCE_CAPTURE_WIDTH;
+    canvas.height = Math.max(1, Math.round(source.videoHeight * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.82);
+  }, [cameraExpanded]);
+
+  const currentSourceElement = useCallback((): CanvasImageSource | null => {
+    if (robot.testingMode) return cameraExpanded ? modalVideoRef.current : videoRef.current;
+    return cameraExpanded ? modalImageRef.current : imageRef.current;
+  }, [cameraExpanded, robot.testingMode]);
 
   useEffect(() => {
     const worker = new Worker(new URL('../../yolo.worker.ts', import.meta.url), { type: 'module' });
@@ -68,17 +106,19 @@ export function ControlTab() {
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data;
       if (message.type === 'model-ready') {
+        setModelLoaded(true);
+        robot.setModelStatus('ready');
         setModelMessage('Model ready');
         return;
       }
       if (message.type === 'detections') {
         if (message.requestId === requestRef.current) {
           const targetCanvas = cameraExpanded ? modalCanvasRef.current : canvasRef.current;
-          const targetImage = cameraExpanded ? modalImageRef.current : imageRef.current;
-          if (targetCanvas && targetImage) drawDetectionOverlay(targetCanvas, targetImage, message.detections);
+          const targetSource = currentSourceElement();
+          if (targetCanvas && targetSource) drawDetectionOverlay(targetCanvas, targetSource, message.detections);
           message.detections.forEach((det) => {
             if (det.classId === 0 || det.classId === 1) {
-              robot.addDetection(det.classId === 0 ? 'pothole' : 'crack', det.score, 'model');
+              robot.addDetection(det.classId === 0 ? 'pothole' : 'crack', det.score, robot.testingMode ? 'test' : 'model');
             }
           });
         }
@@ -86,20 +126,83 @@ export function ControlTab() {
         return;
       }
       processingRef.current = false;
+      setModelLoaded(false);
+      robot.setModelStatus('error');
       setModelMessage(message.message);
-      setProcessingLive(false);
+      stopProcessing();
     };
     return () => {
       worker.terminate();
       if (loopRef.current) window.clearTimeout(loopRef.current);
     };
-  }, [cameraExpanded, robot]);
+  }, [cameraExpanded, currentSourceElement, robot.addDetection, robot.testingMode, stopProcessing]);
 
   useEffect(() => {
-    if (!processingLive || !robot.cameraFrame) return;
+    if (robot.testingMode || !robot.cameraFrame) return;
+    latestFrameUrlRef.current = robot.cameraFrame;
+    if (imageRef.current) imageRef.current.src = robot.cameraFrame;
+    if (modalImageRef.current) modalImageRef.current.src = robot.cameraFrame;
+  }, [robot.cameraFrame, robot.testingMode]);
+
+  useEffect(() => {
+    if (!robot.testingMode) {
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      if (modalVideoRef.current) modalVideoRef.current.srcObject = null;
+      return;
+    }
+
+    let cancelled = false;
+    stopProcessing();
+    latestFrameUrlRef.current = '';
+    clearDetectionCanvases();
+    setModelMessage((current) => current === 'No ONNX model loaded' ? 'Testing mode uses laptop camera' : current);
+
+    navigator.mediaDevices?.getUserMedia({ video: true, audio: false })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        cameraStreamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+        if (modalVideoRef.current) modalVideoRef.current.srcObject = stream;
+        if (modelLoaded) {
+          setModelMessage('Testing mode model detection running...');
+          setProcessingLive(true);
+          robot.setModelStatus('running');
+        }
+      })
+      .catch((error) => {
+        robot.setTestingMode(false);
+        setModelMessage(error instanceof Error ? error.message : 'Could not start laptop camera');
+      });
+
+    return () => {
+      cancelled = true;
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    };
+  }, [clearDetectionCanvases, modelLoaded, robot.setModelStatus, robot.setTestingMode, robot.testingMode, stopProcessing]);
+
+  useEffect(() => {
+    if (robot.testingMode && modalVideoRef.current && cameraStreamRef.current) {
+      modalVideoRef.current.srcObject = cameraStreamRef.current;
+    }
+    if (!robot.testingMode && modalImageRef.current && latestFrameUrlRef.current) {
+      modalImageRef.current.src = latestFrameUrlRef.current;
+    }
+  }, [cameraExpanded, robot.testingMode]);
+
+  useEffect(() => {
+    const hasSource = robot.testingMode || Boolean(latestFrameUrlRef.current || robot.cameraFrame);
+    if (!processingLive || !hasSource) return;
+    robot.setModelStatus('running');
     const tick = () => {
-      const targetImage = cameraExpanded ? modalImageRef.current : imageRef.current;
-      if (!targetImage || processingRef.current || !workerRef.current) {
+      const frameUrl = robot.testingMode ? captureTestingFrame() : latestFrameUrlRef.current;
+      const targetSource = currentSourceElement();
+      if (!frameUrl || !targetSource || processingRef.current || !workerRef.current) {
         loopRef.current = window.setTimeout(tick, STREAM_INFERENCE_INTERVAL_MS);
         return;
       }
@@ -108,7 +211,7 @@ export function ControlTab() {
       workerRef.current.postMessage({
         type: 'detect',
         requestId: requestRef.current,
-        frameUrl: robot.cameraFrame,
+        frameUrl,
         confidenceThreshold: confidence,
         iouThreshold: iou,
       });
@@ -117,8 +220,9 @@ export function ControlTab() {
     tick();
     return () => {
       if (loopRef.current) window.clearTimeout(loopRef.current);
+      robot.setModelStatus(modelLoaded ? 'ready' : 'idle');
     };
-  }, [cameraExpanded, confidence, iou, processingLive, robot.cameraFrame]);
+  }, [captureTestingFrame, confidence, currentSourceElement, iou, modelLoaded, processingLive, robot.cameraFrame, robot.setModelStatus, robot.testingMode]);
 
   useEffect(() => {
     if (!robot.tomTomApiKey || pathPositions.length < 2) {
@@ -153,16 +257,44 @@ export function ControlTab() {
     const file = event.target.files?.[0];
     if (!file) return;
     robot.setSelectedModelPath(file.name);
+    robot.setModelStatus('loading');
+    setModelLoaded(false);
     setModelMessage(`Loading ${file.name}...`);
     workerRef.current?.postMessage({ type: 'load-model', modelFile: file });
   };
 
+  const toggleTestingMode = () => {
+    const nextTestingMode = !robot.testingMode;
+    robot.setTestingMode(nextTestingMode);
+    if (!nextTestingMode) {
+      stopProcessing();
+      return;
+    }
+    if (!modelLoaded) {
+      setModelMessage('Testing mode needs an ONNX model before model detection can run.');
+      return;
+    }
+    setModelMessage('Testing mode model detection running...');
+    setProcessingLive(true);
+    robot.setModelStatus('running');
+  };
+
+  const startModelTest = () => {
+    if (!modelLoaded) {
+      setModelMessage('Load an ONNX model first, then run the test with model detection.');
+      return;
+    }
+    if (!robot.testingMode) {
+      robot.setTestingMode(true);
+    }
+    setModelMessage('Testing mode model detection running...');
+    setProcessingLive(true);
+    robot.setModelStatus('running');
+  };
+
   const closeExpandedCamera = () => {
     setCameraExpanded(false);
-    setProcessingLive(false);
-    processingRef.current = false;
-    requestRef.current += 1;
-    if (loopRef.current) window.clearTimeout(loopRef.current);
+    stopProcessing();
     clearCanvas(modalCanvasRef.current);
   };
 
@@ -179,7 +311,10 @@ export function ControlTab() {
   );
 
   return (
-    <div className="grid h-[calc(100vh-8.5rem)] grid-cols-1 gap-4 overflow-hidden xl:grid-cols-[minmax(360px,0.95fr)_minmax(460px,1.05fr)]">
+    <div className="flex h-[calc(100vh-8.5rem)] flex-col gap-4 overflow-hidden">
+      <SensorStrap th={th} />
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden xl:grid-cols-[minmax(360px,0.95fr)_minmax(460px,1.05fr)]">
       <section className="min-h-0 space-y-4 overflow-y-auto pr-1">
         <Card title="Operation Mode" icon={<Bot className="h-4 w-4 text-amber-400" />} th={th}>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -193,7 +328,8 @@ export function ControlTab() {
           </div>
         </Card>
 
-        <Card title="Manual Movement" icon={<CircleDot className="h-4 w-4 text-blue-400" />} th={th}>
+        {robot.mode === 'manual' && <Card title="Manual Movement" icon={<CircleDot className="h-4 w-4 text-blue-400" />} th={th}>
+          <NumberInput label="Manual Speed (m/s)" value={robot.manualSpeed} min={0.05} step={0.05} onChange={robot.setManualSpeed} th={th} />
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className={`flex overflow-hidden rounded-lg border ${th.isDark ? 'border-slate-600' : 'border-slate-300'}`}>
               <button onClick={() => setInputMode('toggle')} className={`px-3 py-1.5 text-xs font-mono ${inputMode === 'toggle' ? 'bg-blue-500 text-white' : th.button}`}>TOGGLE DEFAULT</button>
@@ -202,29 +338,35 @@ export function ControlTab() {
             <button type="button" onClick={() => robot.sendVelocity(0, 0)} className="rounded-lg border border-red-500/40 bg-red-500/15 px-3 py-1.5 text-xs font-mono text-red-400">STOP</button>
           </div>
           <div className="flex justify-center">
-            <DPad onChange={robot.sendVelocity} speedLimit={robot.scriptedMove.speed} toggleMode={inputMode === 'toggle'} />
+            <DPad onChange={robot.sendVelocity} speedLimit={robot.manualSpeed} toggleMode={inputMode === 'toggle'} />
           </div>
           <div className="mt-3 grid grid-cols-2 gap-3">
             <Metric label="Cmd Vel" value={`${robot.joystickOutput.linear.toFixed(2)} m/s`} th={th} />
             <Metric label="Cmd Ang" value={`${robot.joystickOutput.angular.toFixed(2)} r/s`} th={th} />
           </div>
-        </Card>
+        </Card>}
 
-        <Card title="Manual Scripted Path" icon={<ClipboardList className="h-4 w-4 text-amber-400" />} th={th}>
+        {robot.mode === 'semi' && <Card title="Manual Scripted Path" icon={<ClipboardList className="h-4 w-4 text-amber-400" />} th={th}>
+          <NumberInput label="Semi Default Speed (m/s)" value={robot.semiSpeed} min={0.05} step={0.05} onChange={(value) => { robot.setSemiSpeed(value); robot.setScriptedMove({ speed: value }); }} th={th} />
           <div className="grid grid-cols-2 gap-3">
             <Select label="Direction" value={robot.scriptedMove.direction} onChange={(value) => robot.setScriptedMove({ direction: value as any })} options={['forward', 'backward', 'left', 'right']} th={th} />
             <Select label="Movement" value={robot.scriptedMove.movementType} onChange={(value) => robot.setScriptedMove({ movementType: value as any })} options={['straight', 'turn', 'arc']} th={th} />
             <NumberInput label="Distance (m)" value={robot.scriptedMove.distance} min={0.1} step={0.1} onChange={(value) => robot.setScriptedMove({ distance: value })} th={th} />
             <NumberInput label="Speed (m/s)" value={robot.scriptedMove.speed} min={0.05} step={0.05} onChange={(value) => robot.setScriptedMove({ speed: value })} th={th} />
           </div>
+          <button type="button" onClick={robot.addScriptedMove} className={`mt-3 flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${th.button}`}>
+            <Plus className="h-4 w-4" /> Add movement step
+          </button>
+          <ScriptedMoveList th={th} />
           <div className="mt-4 grid grid-cols-3 gap-2">
             <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={robot.startScriptedMove} color="green" disabled={!isConnected} />
             <ActionButton label="Pause" icon={<Pause className="h-4 w-4" />} onClick={robot.pauseScriptedMove} color="amber" disabled={robot.pathExecStatus !== 'running'} />
             <ActionButton label="Reset" icon={<RotateCcw className="h-4 w-4" />} onClick={robot.resetScriptedMove} color="red" disabled={robot.pathExecStatus === 'idle'} />
           </div>
-        </Card>
+        </Card>}
 
-        <Card title="Waypoint Autonomous" icon={<MapPinned className="h-4 w-4 text-green-400" />} th={th}>
+        {robot.mode === 'fully' && <Card title="Waypoint Autonomous" icon={<MapPinned className="h-4 w-4 text-green-400" />} th={th}>
+          <NumberInput label="Max Speed Limit (m/s)" value={robot.autonomousMaxSpeed} min={0.05} step={0.05} onChange={robot.setAutonomousMaxSpeed} th={th} />
           <div className="max-h-40 space-y-2 overflow-y-auto">
             {sortedWaypoints.length === 0 ? <p className={`text-xs font-mono ${th.label}`}>Use the map on the right to set waypoints.</p> : sortedWaypoints.map((wp, index) => (
               <div key={wp.id} className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs font-mono ${th.panel}`}>
@@ -234,21 +376,20 @@ export function ControlTab() {
             ))}
           </div>
           <div className="mt-4 grid grid-cols-3 gap-2">
-            <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={robot.startPath} color="green" disabled={!isConnected || sortedWaypoints.length === 0} />
+            <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={() => robot.startPath({ points: sortedWaypoints.map(({ lat, lng }) => ({ lat, lng })), source: 'direct', maxSpeed: robot.autonomousMaxSpeed })} color="green" disabled={!isConnected || sortedWaypoints.length === 0} />
             <ActionButton label="Pause" icon={<Pause className="h-4 w-4" />} onClick={robot.pausePath} color="amber" disabled={robot.pathExecStatus !== 'running'} />
             <ActionButton label="Reset" icon={<RotateCcw className="h-4 w-4" />} onClick={robot.resetPath} color="red" disabled={robot.pathExecStatus === 'idle'} />
           </div>
           <div className={`mt-2 text-center text-xs font-mono ${th.label}`}>STATUS: {robot.pathExecStatus.toUpperCase()}</div>
-        </Card>
+        </Card>}
 
         <Card title="Road Painting" icon={<Paintbrush className="h-4 w-4 text-amber-400" />} th={th}>
           <div className="grid grid-cols-2 gap-3">
             <Select label="Paint Type" value={robot.painting.mode} onChange={(value) => robot.setPainting({ mode: value as any })} options={['solid', 'dashed']} th={th} />
-            <NumberInput label="Line Width (cm)" value={robot.painting.lineWidth} min={1} step={1} onChange={(value) => robot.setPainting({ lineWidth: value })} th={th} />
-            <NumberInput label="Dash (m)" value={robot.painting.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ dashLength: value })} th={th} />
-            <NumberInput label="Gap (m)" value={robot.painting.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ gapLength: value })} th={th} />
+            {robot.painting.mode === 'dashed' && <NumberInput label="Dash (m)" value={robot.painting.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ dashLength: value })} th={th} />}
+            {robot.painting.mode === 'dashed' && <NumberInput label="Gap (m)" value={robot.painting.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ gapLength: value })} th={th} />}
           </div>
-          <DashedPreview color={robot.painting.color} dash={robot.painting.dashLength} gap={robot.painting.gapLength} />
+          <LinePreview mode={robot.painting.mode} color={robot.painting.color} dash={robot.painting.dashLength} gap={robot.painting.gapLength} />
           <button
             type="button"
             disabled={!isConnected}
@@ -264,8 +405,11 @@ export function ControlTab() {
             <button type="button" onClick={() => robot.recordManualReading()} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${th.button}`}>
               <Save className="h-4 w-4" /> Record reading
             </button>
-            <button type="button" onClick={robot.injectTestReport} className="flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 px-3 py-2 text-xs font-mono text-purple-300">
-              <TestTube2 className="h-4 w-4" /> Test application
+            <button type="button" onClick={startModelTest} className="flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 px-3 py-2 text-xs font-mono text-purple-300">
+              <TestTube2 className="h-4 w-4" /> Test model detection
+            </button>
+            <button type="button" onClick={toggleTestingMode} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${robot.testingMode ? 'border-purple-400 bg-purple-500 text-white' : th.button}`}>
+              {robot.testingMode ? <VideoOff className="h-4 w-4" /> : <Video className="h-4 w-4" />} {robot.testingMode ? 'Stop model test' : 'Test with model'}
             </button>
           </div>
         </Card>
@@ -275,9 +419,11 @@ export function ControlTab() {
         <Card title="Camera Stream" icon={<Camera className="h-4 w-4 text-amber-400" />} th={th}>
           <CameraPanel
             imageRef={imageRef}
+            videoRef={videoRef}
             canvasRef={canvasRef}
             frame={robot.cameraFrame}
             live={robot.cameraLive}
+            testingMode={robot.testingMode}
             processing={processingLive}
             message={modelMessage}
             confidence={confidence}
@@ -286,11 +432,10 @@ export function ControlTab() {
             onIou={setIou}
             onModelChange={handleModelChange}
             onToggleProcessing={() => setProcessingLive((value) => !value)}
+            onClear={clearDetectionCanvases}
             onExpand={() => setCameraExpanded(true)}
           />
         </Card>
-
-        <SensorStrap th={th} />
 
         <Card title="Waypoint Map" icon={<MapPinned className="h-4 w-4 text-green-400" />} th={th}>
           <div className="mb-2 flex items-center justify-between gap-3">
@@ -302,6 +447,7 @@ export function ControlTab() {
           <WaypointMap height={300} routePositions={routePositions.length ? routePositions : pathPositions} />
         </Card>
       </section>
+      </div>
 
       {cameraExpanded && (
         <div className="fixed inset-0 z-[2500] bg-black/85 p-4">
@@ -313,7 +459,11 @@ export function ControlTab() {
               </button>
             </div>
             <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-slate-700 bg-black">
-              {robot.cameraFrame ? <img ref={modalImageRef} src={robot.cameraFrame} alt="Expanded robot stream" className="absolute inset-0 h-full w-full object-contain" /> : null}
+              {robot.testingMode ? (
+                <video ref={modalVideoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-fill" />
+              ) : (
+                <img ref={modalImageRef} alt="Expanded robot stream" className="absolute inset-0 h-full w-full object-fill" />
+              )}
               <canvas ref={modalCanvasRef} className="absolute inset-0 h-full w-full" />
             </div>
           </div>
@@ -348,11 +498,13 @@ function Card({ title, icon, children, th }: { title: string; icon: React.ReactN
   );
 }
 
-function CameraPanel({ imageRef, canvasRef, frame, live, processing, message, confidence, iou, onConfidence, onIou, onModelChange, onToggleProcessing, onExpand }: {
+function CameraPanel({ imageRef, videoRef, canvasRef, frame, live, testingMode, processing, message, confidence, iou, onConfidence, onIou, onModelChange, onToggleProcessing, onClear, onExpand }: {
   imageRef: React.MutableRefObject<HTMLImageElement | null>;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   canvasRef: React.MutableRefObject<HTMLCanvasElement | null>;
   frame: string;
   live: boolean;
+  testingMode: boolean;
   processing: boolean;
   message: string;
   confidence: number;
@@ -361,15 +513,21 @@ function CameraPanel({ imageRef, canvasRef, frame, live, processing, message, co
   onIou: (value: number) => void;
   onModelChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onToggleProcessing: () => void;
+  onClear: () => void;
   onExpand: () => void;
 }) {
+  const hasSource = testingMode || Boolean(frame);
   return (
     <div className="space-y-3">
-      <div className="relative h-52 overflow-hidden rounded-lg border border-slate-700 bg-black">
-        {frame ? <img ref={imageRef} src={frame} alt="Robot camera stream" className="absolute inset-0 h-full w-full object-contain" /> : null}
+      <div className="relative grid h-[clamp(260px,42vh,460px)] place-items-center overflow-hidden rounded-lg border border-slate-700 bg-black">
+        {testingMode ? (
+          <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-fill" />
+        ) : (
+          <img ref={imageRef} alt="Robot camera stream" className={`absolute inset-0 h-full w-full object-fill ${frame ? '' : 'opacity-0'}`} />
+        )}
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
-        {!frame && <div className="absolute inset-0 grid place-items-center text-xs font-mono text-slate-500">Waiting for bridge camera frame</div>}
-        <div className="absolute left-2 top-2 rounded bg-black/70 px-2 py-1 text-[11px] font-mono text-slate-200">{live ? 'LIVE' : 'OFFLINE'}</div>
+        {!hasSource && <div className="absolute inset-0 grid place-items-center text-xs font-mono text-slate-500">Waiting for bridge camera frame</div>}
+        <div className="absolute left-2 top-2 rounded bg-black/70 px-2 py-1 text-[11px] font-mono text-slate-200">{testingMode ? 'TEST CAMERA' : live ? 'LIVE' : 'OFFLINE'}</div>
         <button type="button" onClick={onExpand} className="absolute right-2 top-2 rounded bg-black/70 p-1.5 text-slate-200" title="Enlarge camera">
           <Maximize2 className="h-4 w-4" />
         </button>
@@ -389,8 +547,11 @@ function CameraPanel({ imageRef, canvasRef, frame, live, processing, message, co
           Load ONNX
           <input type="file" accept=".onnx" className="hidden" onChange={onModelChange} />
         </label>
-        <button type="button" onClick={onToggleProcessing} disabled={!frame} className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-xs font-mono text-amber-300 disabled:opacity-40">
+        <button type="button" onClick={onToggleProcessing} disabled={!hasSource} className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-xs font-mono text-amber-300 disabled:opacity-40">
           {processing ? 'Stop detection' : 'Start detection'}
+        </button>
+        <button type="button" onClick={onClear} className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-200">
+          Clear detections
         </button>
         <span className="text-xs font-mono text-slate-500">{message}</span>
       </div>
@@ -399,29 +560,62 @@ function CameraPanel({ imageRef, canvasRef, frame, live, processing, message, co
 }
 
 function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
-  const { gps, imu, encoders, battery, latency, bridgeStats, cameraLive } = useRobot();
+  const { gps, imu, encoders, battery, latency, bridgeStats, cameraLive, gpsLive, imuLive, encodersLive, potholeCount, crackCount, testingMode } = useRobot();
   return (
     <section className={`rounded-xl border p-4 ${th.card}`}>
       <h3 className={`mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}><Activity className="h-4 w-4 text-amber-400" />Sensor Strap</h3>
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
-        <Metric label="GPS" value={gps.fix ? 'FIX' : 'NO FIX'} th={th} />
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
+        <Metric label="GPS" value={gps.fix ? 'FIX' : 'NO FIX'} th={th} error={!gpsLive || !gps.fix} />
         <Metric label="Lat" value={gps.lat.toFixed(6)} th={th} />
         <Metric label="Lng" value={gps.lng.toFixed(6)} th={th} />
         <Metric label="Accuracy" value={`${gps.accuracy.toFixed(1)} m`} th={th} />
         <Metric label="Heading" value={`${gps.heading.toFixed(1)} deg`} th={th} />
-        <Metric label="Yaw" value={`${imu.yaw.toFixed(1)} deg`} th={th} />
+        <Metric label="Yaw" value={`${imu.yaw.toFixed(1)} deg`} th={th} error={!imuLive} />
         <Metric label="Roll/Pitch" value={`${imu.roll.toFixed(1)} / ${imu.pitch.toFixed(1)}`} th={th} />
-        <Metric label="Ticks L/R" value={`${encoders.leftTicks} / ${encoders.rightTicks}`} th={th} />
+        <Metric label="Ticks L/R" value={`${encoders.leftTicks} / ${encoders.rightTicks}`} th={th} error={!encodersLive} />
         <Metric label="RPM L/R" value={`${encoders.leftRPM.toFixed(1)} / ${encoders.rightRPM.toFixed(1)}`} th={th} />
         <Metric label="Velocity" value={`${encoders.linearVelocity.toFixed(2)} m/s`} th={th} />
         <Metric label="Odom Err" value={`${encoders.odometryError.toFixed(3)} m`} th={th} />
         <Metric label="Battery" value={`${battery.toFixed(1)}%`} th={th} />
         <Metric label="Latency" value={`${latency.toFixed(0)} ms`} th={th} />
         <Metric label="Bridge FPS" value={`${(bridgeStats?.loop_fps ?? bridgeStats?.stream_fps ?? 0).toFixed(1)}`} th={th} />
-        <Metric label="Camera" value={cameraLive ? 'LIVE' : 'OFFLINE'} th={th} />
+        <Metric label="Camera" value={testingMode ? 'TEST' : cameraLive ? 'LIVE' : 'OFFLINE'} th={th} error={!testingMode && (!cameraLive || Boolean(bridgeStats?.camera_error))} />
+        <Metric label="Potholes" value={String(potholeCount)} th={th} />
+        <Metric label="Cracks" value={String(crackCount)} th={th} />
       </div>
       {bridgeStats?.camera_error ? <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs font-mono text-red-300">{bridgeStats.camera_error}</div> : null}
     </section>
+  );
+}
+
+function ScriptedMoveList({ th }: { th: ReturnType<typeof useCards> }) {
+  const { scriptedMoves, removeScriptedMove, moveScriptedMove } = useRobot();
+  if (scriptedMoves.length === 0) {
+    return <div className={`mt-3 rounded-lg border p-3 text-xs font-mono ${th.panel} ${th.label}`}>No queued steps. Start will run the current movement once.</div>;
+  }
+  return (
+    <div className="mt-3 max-h-52 space-y-2 overflow-y-auto">
+      {scriptedMoves.map((step, index) => (
+        <div key={step.id} className={`grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-lg border p-2 text-xs font-mono ${th.panel}`}>
+          <span className="grid h-7 w-7 place-items-center rounded-full bg-amber-500 text-slate-950">{index + 1}</span>
+          <div className="min-w-0">
+            <div className={`truncate font-semibold ${th.value}`}>{step.direction} - {step.movementType}</div>
+            <div className={`truncate ${th.label}`}>{step.distance.toFixed(2)} m at {step.speed.toFixed(2)} m/s</div>
+          </div>
+          <div className="flex items-center gap-1">
+            <button type="button" onClick={() => moveScriptedMove(step.id, 'up')} disabled={index === 0} className="rounded border border-slate-600 p-1 disabled:opacity-30" title="Move step up">
+              <ArrowUp className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" onClick={() => moveScriptedMove(step.id, 'down')} disabled={index === scriptedMoves.length - 1} className="rounded border border-slate-600 p-1 disabled:opacity-30" title="Move step down">
+              <ArrowDown className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" onClick={() => removeScriptedMove(step.id)} className="rounded border border-red-500/40 bg-red-500/10 p-1 text-red-300" title="Remove step">
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -507,10 +701,13 @@ function detectionIcon(type: 'pothole' | 'crack') {
   });
 }
 
-function Metric({ label, value, th }: { label: string; value: string; th: ReturnType<typeof useCards> }) {
+function Metric({ label, value, th, error = false }: { label: string; value: string; th: ReturnType<typeof useCards>; error?: boolean }) {
   return (
-    <div className={`min-w-0 rounded-lg border p-2 ${th.panel}`}>
-      <div className={`truncate text-[10px] font-mono uppercase tracking-wider ${th.label}`}>{label}</div>
+    <div className={`min-w-0 rounded-lg border p-2 ${error ? 'border-red-500/40 bg-red-500/10' : th.panel}`}>
+      <div className={`flex items-center gap-1 truncate text-[10px] font-mono uppercase tracking-wider ${error ? 'text-red-300' : th.label}`}>
+        {error && <AlertTriangle className="h-3 w-3 shrink-0" />}
+        <span className="truncate">{label}</span>
+      </div>
       <div className={`truncate text-sm font-mono tabular-nums ${th.value}`}>{value}</div>
     </div>
   );
@@ -545,7 +742,13 @@ function ActionButton({ label, icon, onClick, color, disabled }: { label: string
   return <button type="button" disabled={disabled} onClick={onClick} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono disabled:cursor-not-allowed disabled:opacity-40 ${colors}`}>{icon}{label}</button>;
 }
 
-function DashedPreview({ color, dash, gap }: { color: string; dash: number; gap: number }) {
+function LinePreview({ mode, color, dash, gap }: { mode: 'solid' | 'dashed'; color: string; dash: number; gap: number }) {
+  const lineStyle = mode === 'solid'
+    ? { backgroundColor: color, filter: `drop-shadow(0 0 8px ${color})` }
+    : {
+        backgroundImage: `repeating-linear-gradient(90deg, ${color} 0, ${color} ${dash * 70}px, transparent ${dash * 70}px, transparent ${(dash + gap) * 70}px)`,
+        filter: `drop-shadow(0 0 8px ${color})`,
+      };
   return (
     <div className="mt-4 rounded-lg border border-slate-700 bg-slate-950 p-3">
       <div className="relative h-20 overflow-hidden rounded bg-slate-800">
@@ -553,13 +756,10 @@ function DashedPreview({ color, dash, gap }: { color: string; dash: number; gap:
         <div className="absolute inset-x-0 bottom-4 h-1 bg-white/20" />
         <div
           className="absolute left-0 right-0 top-1/2 h-3 -translate-y-1/2"
-          style={{
-            backgroundImage: `repeating-linear-gradient(90deg, ${color} 0, ${color} ${dash * 70}px, transparent ${dash * 70}px, transparent ${(dash + gap) * 70}px)`,
-            filter: `drop-shadow(0 0 8px ${color})`,
-          }}
+          style={lineStyle}
         />
       </div>
-      <div className="mt-2 text-xs font-mono text-slate-500">Expected dashed paint shape</div>
+      <div className="mt-2 text-xs font-mono text-slate-500">Expected {mode} paint shape</div>
     </div>
   );
 }

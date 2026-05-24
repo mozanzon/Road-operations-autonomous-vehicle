@@ -108,6 +108,8 @@ export interface RobotContextType {
   bridgeStats: BridgeStats | null;
   cameraFrame: string;
   cameraLive: boolean;
+  testingMode: boolean;
+  setTestingMode: (enabled: boolean) => void;
   modelStatus: 'idle' | 'loading' | 'ready' | 'running' | 'error';
   selectedModelPath: string;
   setSelectedModelPath: (value: string) => void;
@@ -166,6 +168,7 @@ export interface RobotContextType {
 type BridgePayload = {
   frame?: string;
   arduino?: Record<string, unknown> | null;
+  raw?: string;
   stats?: BridgeStats;
 };
 
@@ -175,6 +178,8 @@ const DEFAULT_ENCODERS: EncoderData = { leftTicks: 0, rightTicks: 0, leftRPM: 0,
 const MODEL_STORAGE_KEY = 'roboscan-selected-model-path';
 const TOMTOM_STORAGE_KEY = 'roboscan-tomtom-api-key';
 const BRIDGE_PORT = 8765;
+const MIN_COMMAND_PWM = 1;
+const MAX_COMMAND_PWM = 255;
 
 const RobotContext = createContext<RobotContextType>({} as RobotContextType);
 
@@ -188,6 +193,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [bridgeStats, setBridgeStats] = useState<BridgeStats | null>(null);
   const [cameraFrame, setCameraFrame] = useState('');
   const [cameraLive, setCameraLive] = useState(false);
+  const [testingMode, setTestingMode] = useState(false);
   const [modelStatus, setModelStatus] = useState<RobotContextType['modelStatus']>('idle');
   const [selectedModelPathState, setSelectedModelPathState] = useState(() => localStorage.getItem(MODEL_STORAGE_KEY) ?? '');
   const [tomTomApiKeyState, setTomTomApiKeyState] = useState(() => localStorage.getItem(TOMTOM_STORAGE_KEY) ?? '');
@@ -263,15 +269,94 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     socket.send(JSON.stringify(payload ? { type: command, ...payload } : { type: command }));
   }, []);
 
+  useEffect(() => {
+    if (!testingMode) return;
+
+    setConnectionStatus('disconnected');
+    setCameraLive(true);
+    setBridgeStats({
+      camera_connected: true,
+      camera_has_frame: true,
+      camera_source: 'laptop-test-camera',
+      loop_fps: 24,
+      stream_fps: 24,
+      camera_error: null,
+    });
+    appendReportEvent({ kind: 'test', source: 'test', label: 'Testing mode enabled', details: 'Laptop camera and simulated sensors active' });
+
+    let tick = 0;
+    const timer = window.setInterval(() => {
+      tick += 1;
+      const now = Date.now();
+      const simulatedGps: GPSData = {
+        lat: DEFAULT_GPS.lat + tick * 0.00001,
+        lng: DEFAULT_GPS.lng + tick * 0.000012,
+        speed: 0.35 + (tick % 6) * 0.03,
+        heading: (tick * 8) % 360,
+        fix: true,
+        accuracy: 1.8,
+        timestamp: now,
+      };
+      const simulatedImu: IMUData = {
+        roll: Math.sin(tick / 5) * 2,
+        pitch: Math.cos(tick / 6) * 2,
+        yaw: simulatedGps.heading,
+        accelX: 0.02,
+        accelY: 0.01,
+        accelZ: 9.81,
+        gyroX: 0.01,
+        gyroY: 0.02,
+        gyroZ: 0.03,
+        timestamp: now,
+      };
+      const simulatedEncoders: EncoderData = {
+        leftTicks: tick * 12,
+        rightTicks: tick * 12 + (tick % 3),
+        leftRPM: 42 + (tick % 5),
+        rightRPM: 42 + ((tick + 2) % 5),
+        linearVelocity: simulatedGps.speed,
+        odometryError: Math.abs(Math.sin(tick / 8)) * 0.03,
+        errorHistory: [...latestRef.current.encoders.errorHistory.slice(-59), Math.abs(Math.sin(tick / 8)) * 0.03],
+        timestamp: now,
+      };
+      setGps(simulatedGps);
+      setImu(simulatedImu);
+      setEncoders(simulatedEncoders);
+      setGpsLive(true);
+      setImuLive(true);
+      setEncodersLive(true);
+      setBattery(88 - (tick % 8));
+      setLatency(12 + (tick % 5));
+      setTotalDistance((prev) => prev + simulatedGps.speed * 0.5);
+      setSegmentDistance((prev) => prev + simulatedGps.speed * 0.5);
+    }, 500);
+
+    return () => {
+      window.clearInterval(timer);
+      setCameraLive(false);
+      setBridgeStats(null);
+      setGpsLive(false);
+      setImuLive(false);
+      setEncodersLive(false);
+    };
+  }, [appendReportEvent, testingMode]);
+
   const sendVelocity = useCallback((linear: number, angular: number) => {
     setJoystickOutputState({ linear, angular });
-    sendCommand('velocity', {
-      linear,
-      angular,
-      paint: motionPaintMode === 'paint',
-      painting_mode: painting.mode,
-    });
-  }, [motionPaintMode, painting.mode, sendCommand]);
+    const speed = velocityToPwm(linear, angular);
+
+    if (speed === 0) {
+      sendCommand('stop');
+      return;
+    }
+
+    if (Math.abs(linear) >= Math.abs(angular)) {
+      sendCommand('movement', { action: linear > 0 ? 'forward' : 'backward', speed });
+      return;
+    }
+
+    sendCommand('movement', { action: angular > 0 ? 'left' : 'right', speed });
+  }, [sendCommand]);
 
   const disconnect = useCallback(() => {
     if (socketRef.current) {
@@ -293,20 +378,20 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const handleArduinoPayload = useCallback((arduino: Record<string, unknown>) => {
     const now = Date.now();
-    const lat = numberFrom(arduino, ['lat', 'latitude', 'gps_lat'], DEFAULT_GPS.lat);
-    const lng = numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon'], DEFAULT_GPS.lng);
-    const gpsFix = boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix'], false);
-    const heading = numberFrom(arduino, ['heading', 'yaw', 'compass'], 0);
-    const speed = numberFrom(arduino, ['speed', 'gps_speed', 'linearVelocity', 'linear_velocity'], 0);
-    const accuracy = numberFrom(arduino, ['accuracy', 'gps_accuracy', 'hdop'], 999);
+    const lat = numberFrom(arduino, ['lat', 'latitude', 'gps_lat', 'la'], DEFAULT_GPS.lat);
+    const lng = numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], DEFAULT_GPS.lng);
+    const gpsFix = boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], false);
+    const heading = numberFrom(arduino, ['heading', 'yaw', 'compass', 'h'], 0);
+    const speed = numberFrom(arduino, ['speed', 'gps_speed', 'linearVelocity', 'linear_velocity', 'v'], 0);
+    const accuracy = numberFrom(arduino, ['accuracy', 'gps_accuracy', 'hdop', 'hd'], 999);
     const nextGps: GPSData = { lat, lng, speed, heading, fix: gpsFix, accuracy, timestamp: now };
     setGps(nextGps);
-    setGpsLive(gpsFix || hasAny(arduino, ['lat', 'latitude', 'lng', 'lon', 'longitude', 'gps_fix']));
+    setGpsLive(gpsFix || hasAny(arduino, ['lat', 'latitude', 'lng', 'lon', 'longitude', 'gps_fix', 'la', 'lo', 'g']));
 
     setImu({
       roll: numberFrom(arduino, ['roll'], 0),
       pitch: numberFrom(arduino, ['pitch'], 0),
-      yaw: numberFrom(arduino, ['yaw', 'heading', 'compass'], heading),
+      yaw: numberFrom(arduino, ['yaw', 'heading', 'compass', 'h'], heading),
       accelX: numberFrom(arduino, ['accelX', 'accel_x', 'ax'], 0),
       accelY: numberFrom(arduino, ['accelY', 'accel_y', 'ay'], 0),
       accelZ: numberFrom(arduino, ['accelZ', 'accel_z', 'az'], 0),
@@ -315,13 +400,13 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       gyroZ: numberFrom(arduino, ['gyroZ', 'gyro_z', 'gz'], 0),
       timestamp: now,
     });
-    setImuLive(hasAny(arduino, ['roll', 'pitch', 'yaw', 'heading', 'compass']));
+    setImuLive(hasAny(arduino, ['roll', 'pitch', 'yaw', 'heading', 'compass', 'h']));
 
     const leftTicks = numberFrom(arduino, ['leftTicks', 'left_ticks', 'encoder_left', 'left', 'e1'], 0);
     const rightTicks = numberFrom(arduino, ['rightTicks', 'right_ticks', 'encoder_right', 'right', 'e2'], 0);
-    const leftRPM = numberFrom(arduino, ['leftRPM', 'left_rpm', 'de1'], 0);
-    const rightRPM = numberFrom(arduino, ['rightRPM', 'right_rpm', 'de2'], 0);
-    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed'], speed);
+    const leftRPM = numberFrom(arduino, ['leftRPM', 'left_rpm', 'de1', 'ls'], 0);
+    const rightRPM = numberFrom(arduino, ['rightRPM', 'right_rpm', 'de2', 'rs'], 0);
+    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed', 'v'], speed);
     const odometryError = numberFrom(arduino, ['odometryError', 'odometry_error', 'odom_error'], 0);
     setEncoders((prev) => ({
       leftTicks,
@@ -333,11 +418,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       errorHistory: [...prev.errorHistory.slice(-59), odometryError],
       timestamp: now,
     }));
-    setEncodersLive(hasAny(arduino, ['leftTicks', 'left_ticks', 'rightTicks', 'right_ticks', 'leftRPM', 'rightRPM', 'linearVelocity', 'e1', 'e2', 'de1', 'de2']));
+    setEncodersLive(hasAny(arduino, ['leftTicks', 'left_ticks', 'rightTicks', 'right_ticks', 'leftRPM', 'rightRPM', 'linearVelocity', 'e1', 'e2', 'de1', 'de2', 'ls', 'rs', 'v']));
     setBattery(numberFrom(arduino, ['battery', 'battery_percent', 'batteryLevel'], battery));
     setHostname(stringFrom(arduino, ['hostname', 'host'], hostname));
     setTotalDistance(numberFrom(arduino, ['totalDistance', 'total_distance'], numberFrom(arduino, ['left_m', 'right_m'], totalDistance)));
-    setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance', 'plot_target_m'], segmentDistance));
+    setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance', 'plot_distance_m', 'pd', 'plot_target_m', 'pt'], segmentDistance));
   }, [battery, hostname, segmentDistance, totalDistance]);
 
   const connect = useCallback(() => {
@@ -365,7 +450,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         if (typeof payload.stats.current_target_idx === 'number') setCurrentTargetIdx(payload.stats.current_target_idx);
         if (typeof payload.stats.scripted_step_idx === 'number') setScriptedStepIdx(payload.stats.scripted_step_idx);
       }
-      if (payload.arduino) handleArduinoPayload(payload.arduino);
+      const arduinoPayload = payload.arduino ?? parseCompactArduinoStatus(payload.raw);
+      if (arduinoPayload) handleArduinoPayload(arduinoPayload);
       if (payload.frame) {
         setCameraFrame(`data:image/jpeg;base64,${payload.frame}`);
         setCameraLive(true);
@@ -386,13 +472,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const setMode = useCallback((nextMode: RobotMode) => {
     setModeState(nextMode);
-    sendCommand('mode', { mode: nextMode === 'automatic' ? 'fully' : nextMode });
-  }, [sendCommand]);
+  }, []);
 
   const setMotionPaintMode = useCallback((nextMode: MotionPaintMode) => {
     setMotionPaintModeState(nextMode);
-    sendCommand('paint_motion_mode', { mode: nextMode });
-  }, [sendCommand]);
+  }, []);
 
   const addWaypoint = useCallback((lat: number, lng: number) => {
     setWaypoints((prev) => [...prev, { id: `wp-${Date.now()}`, lat, lng, order: prev.length }]);
@@ -414,31 +498,24 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setPathExecStatus('running');
     setCurrentTargetIdx(0);
     const routePoints = route?.points ?? waypoints.map(({ lat, lng }) => ({ lat, lng }));
-    sendCommand('start_path', {
-      waypoints,
-      route_points: routePoints,
-      route_source: route?.source ?? 'direct',
-      max_speed: route?.maxSpeed ?? autonomousMaxSpeed,
-    });
     appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${route?.maxSpeed ?? autonomousMaxSpeed}m/s` });
-  }, [appendReportEvent, autonomousMaxSpeed, sendCommand, waypoints]);
+  }, [appendReportEvent, autonomousMaxSpeed, waypoints]);
 
   const pausePath = useCallback(() => {
     setPathExecStatus('paused');
-    sendCommand('pause_path');
+    sendCommand('stop');
   }, [sendCommand]);
 
   const stopPath = useCallback(() => {
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
-    sendCommand('stop_path');
+    sendCommand('stop');
   }, [sendCommand]);
 
   const resetPath = useCallback(() => {
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
-    sendCommand('reset_path');
-  }, [sendCommand]);
+  }, []);
 
   const setScriptedMove = useCallback((move: Partial<ScriptedMove>) => {
     setScriptedMoveState((prev) => ({ ...prev, ...move }));
@@ -470,25 +547,39 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const steps = scriptedMoves.length ? scriptedMoves : [{ ...scriptedMoveState, id: `step-${Date.now()}-single` }];
     setPathExecStatus('running');
     setScriptedStepIdx(0);
-    sendCommand('scripted_path_start', { steps });
+    const firstStep = steps[0];
+    const speed = normalizedSpeedToPwm(firstStep.speed);
+    sendCommand('speed', { speed });
+    sendCommand('movement', { action: firstStep.direction, speed });
     appendReportEvent({ kind: 'command', source: 'robot', label: 'Started scripted path', details: `${steps.length} movement step${steps.length === 1 ? '' : 's'}` });
   }, [appendReportEvent, scriptedMoveState, scriptedMoves, sendCommand]);
 
   const pauseScriptedMove = useCallback(() => {
     setPathExecStatus('paused');
-    sendCommand('scripted_path_pause');
+    sendCommand('stop');
   }, [sendCommand]);
 
   const resetScriptedMove = useCallback(() => {
     setPathExecStatus('idle');
     setScriptedStepIdx(0);
-    sendCommand('scripted_path_reset');
+    sendCommand('stop');
   }, [sendCommand]);
 
   const setPainting = useCallback((next: Partial<PaintingState>) => {
     setPaintingState((prev) => {
       const updated = { ...prev, ...next };
-      sendCommand('painting', updated as unknown as Record<string, unknown>);
+      if (!updated.active) {
+        sendCommand('plot', { mode: 'off' });
+      } else if (updated.mode === 'dashed') {
+        sendCommand('plot', {
+          mode: 'dash_dist',
+          dash_m: updated.dashLength,
+          gap_m: updated.gapLength,
+        });
+        sendCommand('plot', { mode: 'dash' });
+      } else {
+        sendCommand('plot', { mode: 'cont' });
+      }
       return updated;
     });
   }, [sendCommand]);
@@ -542,7 +633,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   return (
     <RobotContext.Provider value={{
       connectionStatus, connectionIp, setConnectionIp, connect, disconnect,
-      hostname, uptime, battery, latency, bridgeStats, cameraFrame, cameraLive, modelStatus,
+      hostname, uptime, battery, latency, bridgeStats, cameraFrame, cameraLive, testingMode, setTestingMode, modelStatus,
       selectedModelPath: selectedModelPathState, setSelectedModelPath, setModelStatus,
       tomTomApiKey: tomTomApiKeyState, setTomTomApiKey,
       imu, gps, encoders, imuLive, gpsLive, encodersLive,
@@ -577,6 +668,33 @@ function parseBridgePayload(data: unknown): BridgePayload | null {
   } catch {
     return null;
   }
+}
+
+function parseCompactArduinoStatus(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== 'string' || !raw.startsWith('ST,')) return null;
+
+  const parsed: Record<string, unknown> = { type: 'status' };
+  for (const part of raw.slice(3).split(',')) {
+    const [key, value] = part.split('=');
+    if (!key || value === undefined) continue;
+    parsed[key.trim()] = parseCompactValue(value);
+  }
+  return parsed;
+}
+
+function parseCompactValue(value: string): number | string {
+  const trimmed = value.trim();
+  const numeric = Number(trimmed);
+  return trimmed !== '' && Number.isFinite(numeric) ? numeric : trimmed;
+}
+
+function normalizedSpeedToPwm(speed: number): number {
+  if (!Number.isFinite(speed) || speed <= 0) return 0;
+  return Math.max(MIN_COMMAND_PWM, Math.min(MAX_COMMAND_PWM, Math.round(speed * MAX_COMMAND_PWM)));
+}
+
+function velocityToPwm(linear: number, angular: number): number {
+  return normalizedSpeedToPwm(Math.max(Math.abs(linear), Math.abs(angular)));
 }
 
 function numberFrom(data: Record<string, unknown>, keys: string[], fallback: number): number {
