@@ -45,8 +45,8 @@ def parse_ports(value):
 
 def parse_value(value):
     value = value.strip()
-    if value in ("true", "false"):
-      return value == "true"
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
     try:
         parsed = float(value)
         return int(parsed) if parsed.is_integer() else parsed
@@ -71,6 +71,15 @@ def parse_arduino_line(line):
 
     if "heading" in data:
         data["yaw"] = data["heading"]
+    if "gps_heading" in data:
+        data["gpsHeading"] = data["gps_heading"]
+    if "gps_speed" in data:
+        data["gpsSpeed"] = data["gps_speed"]
+    if "gps_hdop" in data:
+        data["hdop"] = data["gps_hdop"]
+        data["accuracy"] = data["gps_hdop"]
+    if "gps_fix" in data:
+        data["fix"] = bool(data["gps_fix"])
     if "drive_moving" in data:
         data["moving"] = bool(data["drive_moving"])
     return data
@@ -84,6 +93,10 @@ class ArduinoLink:
         self.running = True
         self.latest_sensor = None
         self.latest_raw = ""
+        self.latest_ack = None
+        self.latest_error = None
+        self.telemetry_count = 0
+        self.last_parsed_at = None
         self.connected_port = None
         self.lock = threading.Lock()
 
@@ -126,8 +139,16 @@ class ArduinoLink:
                 parsed = parse_arduino_line(line)
                 with self.lock:
                     self.latest_raw = line
-                    if parsed and parsed.get("type") == "status":
+                    if not parsed:
+                        continue
+                    if parsed.get("type") == "status":
                         self.latest_sensor = parsed
+                        self.telemetry_count += 1
+                        self.last_parsed_at = datetime.now().isoformat()
+                    elif parsed.get("type") == "ack":
+                        self.latest_ack = parsed
+                    elif parsed.get("type") == "error":
+                        self.latest_error = parsed
             except Exception as exc:
                 logger.warning("Arduino read failed, reconnecting: %s", exc)
                 try:
@@ -149,7 +170,15 @@ class ArduinoLink:
 
     def snapshot(self):
         with self.lock:
-            return self.latest_sensor, self.latest_raw, self.connected_port
+            return {
+                "sensor": self.latest_sensor,
+                "raw": self.latest_raw,
+                "ack": self.latest_ack,
+                "error": self.latest_error,
+                "port": self.connected_port,
+                "telemetry_count": self.telemetry_count,
+                "last_parsed_at": self.last_parsed_at,
+            }
 
 
 class CameraLink:
@@ -223,8 +252,10 @@ class RobotBridge:
         self.camera = CameraLink(args.camera, args.width, args.height, args.fps, args.jpeg_quality)
         self.host = args.host
         self.port = args.port
+        self.telemetry_fps = args.telemetry_fps
         self.clients = set()
         self.command_history = deque(maxlen=20)
+        self.last_frame_count_sent = -1
 
     def start_background(self):
         self.arduino.start()
@@ -307,24 +338,37 @@ class RobotBridge:
 
     async def broadcast_loop(self):
         while True:
-            sensor, raw, port = self.arduino.snapshot()
+            arduino_snapshot = self.arduino.snapshot()
             frame, frame_count, camera_error = self.camera.snapshot()
+            last_command = self.command_history[-1] if self.command_history else None
             payload = {
                 "timestamp": datetime.now().isoformat(),
-                "arduino": sensor,
-                "raw": raw,
+                "arduino": arduino_snapshot["sensor"],
+                "raw": arduino_snapshot["raw"],
                 "stats": {
                     "connected_clients": len(self.clients),
-                    "arduino_port": port,
+                    "arduino_port": arduino_snapshot["port"],
                     "camera_connected": frame is not None and camera_error is None,
+                    "camera_has_frame": frame is not None,
                     "camera_error": camera_error,
                     "camera_frames_encoded": frame_count,
                     "stream_fps": self.camera.fps,
+                    "telemetry_fps": self.telemetry_fps,
                     "jpeg_quality": self.camera.quality,
+                    "last_raw": arduino_snapshot["raw"],
+                    "last_parsed_at": arduino_snapshot["last_parsed_at"],
+                    "last_command": last_command["command"] if last_command else None,
+                    "last_command_sent": last_command["sent"] if last_command else None,
+                    "telemetry_packets": arduino_snapshot["telemetry_count"],
                 },
             }
-            if frame is not None:
+            if arduino_snapshot["ack"] is not None:
+                payload["ack"] = arduino_snapshot["ack"]
+            if arduino_snapshot["error"] is not None:
+                payload["error"] = arduino_snapshot["error"]
+            if frame is not None and frame_count != self.last_frame_count_sent:
                 payload["frame"] = frame
+                self.last_frame_count_sent = frame_count
 
             if self.clients:
                 message = json.dumps(payload, separators=(",", ":"))
@@ -336,7 +380,7 @@ class RobotBridge:
                     if isinstance(result, Exception):
                         self.clients.discard(client)
 
-            await asyncio.sleep(1.0 / max(1, self.camera.fps))
+            await asyncio.sleep(1.0 / max(1, self.telemetry_fps))
 
     async def run(self):
         self.start_background()
@@ -362,6 +406,7 @@ def main():
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--height", type=int, default=180)
     parser.add_argument("--fps", type=int, default=6)
+    parser.add_argument("--telemetry-fps", type=int, default=20)
     parser.add_argument("--jpeg-quality", type=int, default=32)
     args = parser.parse_args()
 

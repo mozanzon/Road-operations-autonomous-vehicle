@@ -310,6 +310,19 @@ export function ControlTab() {
     </button>
   );
 
+  const paintMode = robot.painting.active ? robot.painting.mode : 'off';
+  const setPaintMode = (value: string) => {
+    if (value === 'off') {
+      robot.setMotionPaintMode('move-only');
+      robot.setPainting({ active: false, status: 'idle' });
+      return;
+    }
+
+    const mode = value as 'solid' | 'dashed';
+    robot.setMotionPaintMode('paint');
+    robot.setPainting({ active: true, mode, status: 'active' });
+  };
+
   return (
     <div className="flex h-[calc(100vh-8.5rem)] flex-col gap-4 overflow-hidden">
       <SensorStrap th={th} />
@@ -321,10 +334,6 @@ export function ControlTab() {
             {modeButton('manual', 'Manual', Gauge)}
             {modeButton('semi', 'Semi', Route)}
             {modeButton('fully', 'Fully', Navigation)}
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button type="button" onClick={() => robot.setMotionPaintMode('move-only')} className={`rounded-lg border px-3 py-2 text-xs font-mono ${robot.motionPaintMode === 'move-only' ? 'bg-blue-500 text-white border-blue-400' : th.button}`}>Move without painting</button>
-            <button type="button" onClick={() => robot.setMotionPaintMode('paint')} className={`rounded-lg border px-3 py-2 text-xs font-mono ${robot.motionPaintMode === 'paint' ? 'bg-amber-500 text-slate-950 border-amber-400' : th.button}`}>Move and paint</button>
           </div>
         </Card>
 
@@ -384,20 +393,12 @@ export function ControlTab() {
         </Card>}
 
         <Card title="Road Painting" icon={<Paintbrush className="h-4 w-4 text-amber-400" />} th={th}>
-          <div className="grid grid-cols-2 gap-3">
-            <Select label="Paint Type" value={robot.painting.mode} onChange={(value) => robot.setPainting({ mode: value as any })} options={['solid', 'dashed']} th={th} />
-            {robot.painting.mode === 'dashed' && <NumberInput label="Dash (m)" value={robot.painting.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ dashLength: value })} th={th} />}
-            {robot.painting.mode === 'dashed' && <NumberInput label="Gap (m)" value={robot.painting.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ gapLength: value })} th={th} />}
+          <div className={`grid gap-3 ${paintMode === 'dashed' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <Select label="Paint Mode" value={paintMode} onChange={setPaintMode} options={['off', 'solid', 'dashed']} th={th} />
+            {paintMode === 'dashed' && <NumberInput label="Dash (m)" value={robot.painting.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ dashLength: value })} th={th} />}
+            {paintMode === 'dashed' && <NumberInput label="Gap (m)" value={robot.painting.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ gapLength: value })} th={th} />}
           </div>
-          <LinePreview mode={robot.painting.mode} color={robot.painting.color} dash={robot.painting.dashLength} gap={robot.painting.gapLength} />
-          <button
-            type="button"
-            disabled={!isConnected}
-            onClick={() => robot.setPainting({ active: !robot.painting.active, status: robot.painting.active ? 'idle' : 'active' })}
-            className={`mt-4 w-full rounded-lg border py-2.5 text-sm font-mono font-bold disabled:cursor-not-allowed disabled:opacity-40 ${robot.painting.active ? 'bg-amber-500 text-slate-950 border-amber-400' : th.button}`}
-          >
-            {robot.painting.active ? 'STOP PAINTING' : 'START PAINTING'}
-          </button>
+          {paintMode !== 'off' && <LinePreview mode={robot.painting.mode} color={robot.painting.color} dash={robot.painting.dashLength} gap={robot.painting.gapLength} />}
         </Card>
 
         <Card title="Record And Test" icon={<TestTube2 className="h-4 w-4 text-purple-400" />} th={th}>
@@ -519,7 +520,7 @@ function CameraPanel({ imageRef, videoRef, canvasRef, frame, live, testingMode, 
   const hasSource = testingMode || Boolean(frame);
   return (
     <div className="space-y-3">
-      <div className="relative grid h-[clamp(260px,42vh,460px)] place-items-center overflow-hidden rounded-lg border border-slate-700 bg-black">
+      <div className="relative grid h-[clamp(180px,28vh,300px)] place-items-center overflow-hidden rounded-lg border border-slate-700 bg-black">
         {testingMode ? (
           <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-fill" />
         ) : (
@@ -718,7 +719,7 @@ function Select({ label, value, options, onChange, th }: { label: string; value:
     <label className="space-y-1">
       <span className={`text-xs font-mono uppercase ${th.label}`}>{label}</span>
       <select value={value} onChange={(event) => onChange(event.target.value)} className={`w-full rounded-lg border px-3 py-2 text-sm font-mono ${th.input}`}>
-        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+        {options.map((option) => <option key={option} value={option}>{option[0].toUpperCase() + option.slice(1)}</option>)}
       </select>
     </label>
   );

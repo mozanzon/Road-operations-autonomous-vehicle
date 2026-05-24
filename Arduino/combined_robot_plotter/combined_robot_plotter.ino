@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <QMC5883LCompass.h>
+#include <TinyGPS++.h>
 
 /*
   Combined RoboScan Controller
@@ -29,10 +30,13 @@
 
   Info:
     STATUS             print current heading, encoders, and plotter mode
+    GPS STATUS         print GPS-only status
+    GPS ONLY ON/OFF    read and stream GPS data only
     HELP               show commands
 */
 
 QMC5883LCompass compass;
+TinyGPSPlus gps;
 
 // Left drive motor driver
 const int M1_RPWM = 5;
@@ -75,6 +79,7 @@ const int DEFAULT_DRIVE_SPEED = 160;
 const int DEFAULT_TURN_SPEED = 60;
 const int DEFAULT_PLOTTER_SPEED = 180;
 const long SERIAL_BAUD_RATE = 115200;
+const long GPS_BAUD_RATE = 9600;
 
 volatile long leftEncoderTicks = 0;
 volatile long rightEncoderTicks = 0;
@@ -106,6 +111,7 @@ enum PlotterMode {
 
 PlotterMode plotterMode = PLOTTER_OFF;
 bool plotterDashMotorOn = false;
+bool gpsOnlyMode = false;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastSpeedSampleMs = 0;
 long lastSpeedLeftTicks = 0;
@@ -117,6 +123,48 @@ float measuredSpeedMps = 0.0;
 const float DRIVE_HEADING_KP = 1.0;
 const float DRIVE_ENCODER_KP = 0.025;
 const int DRIVE_TRIM_LIMIT = 35;
+
+void updateGps() {
+  while (Serial2.available() > 0) {
+    gps.encode(Serial2.read());
+  }
+}
+
+unsigned long gpsAgeMs() {
+  if (!gps.location.isValid()) return 0;
+  return gps.location.age();
+}
+
+bool gpsHasFix() {
+  return gps.location.isValid() && gps.location.age() < 5000;
+}
+
+void printGpsFields() {
+  bool fix = gpsHasFix();
+  Serial.print("|lat=");
+  Serial.print(fix ? gps.location.lat() : 0.0, 6);
+  Serial.print("|lng=");
+  Serial.print(fix ? gps.location.lng() : 0.0, 6);
+  Serial.print("|gps_speed=");
+  Serial.print(gps.speed.isValid() ? gps.speed.mps() : 0.0, 3);
+  Serial.print("|gps_heading=");
+  Serial.print(gps.course.isValid() ? gps.course.deg() : 0.0, 2);
+  Serial.print("|gps_fix=");
+  Serial.print(fix ? 1 : 0);
+  Serial.print("|gps_sat=");
+  Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
+  Serial.print("|gps_hdop=");
+  Serial.print(gps.hdop.isValid() ? gps.hdop.hdop() : 999.0, 2);
+  Serial.print("|gps_age_ms=");
+  Serial.print(gpsAgeMs());
+}
+
+void printGpsStatus() {
+  Serial.print("STATUS");
+  printGpsFields();
+  Serial.print("|gps_only=");
+  Serial.println(gpsOnlyMode ? 1 : 0);
+}
 
 void onLeftA() {
   if (digitalRead(ENC_LEFT_A) != digitalRead(ENC_LEFT_B)) leftEncoderTicks++;
@@ -417,6 +465,7 @@ void printStatus() {
   Serial.print("|rspeed=");
   Serial.print(driveIsMoving ? driveSpeed : 0);
   Serial.print("|battery=0");
+  printGpsFields();
   Serial.print("|drive_speed=");
   Serial.print(driveSpeed);
   Serial.print("|turn_speed=");
@@ -444,7 +493,8 @@ void printStatus() {
 void printStatusIfDue() {
   if (millis() - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
     lastTelemetryMs = millis();
-    printStatus();
+    if (gpsOnlyMode) printGpsStatus();
+    else printStatus();
   }
 }
 
@@ -501,6 +551,7 @@ void turnNinety(int direction) {
   Serial.println(expectedTicks);
 
   while (millis() - startMs < TURN_TIMEOUT_MS) {
+    updateGps();
     updatePlotter();
     printStatusIfDue();
 
@@ -563,6 +614,8 @@ void printHelp() {
   Serial.println("  PLOT TICKS <ticks>      plot for encoder ticks, 0 = unlimited");
   Serial.println("  WHEEL RADIUS <meters>   set wheel radius for distance math");
   Serial.println("  STATUS                  print sensor and mode data");
+  Serial.println("  GPS STATUS              print GPS-only status");
+  Serial.println("  GPS ONLY ON/OFF         read and stream GPS data only");
   Serial.println("  HELP                    show this menu");
   Serial.println();
 }
@@ -573,12 +626,16 @@ void handleCommand(String cmd) {
   cmd.toUpperCase();
 
   if (cmd == "W") {
+    gpsOnlyMode = false;
     driveForward(driveSpeed);
   } else if (cmd == "X") {
+    gpsOnlyMode = false;
     driveBackward(driveSpeed);
   } else if (cmd == "A") {
+    gpsOnlyMode = false;
     turnNinety(-1);
   } else if (cmd == "D") {
+    gpsOnlyMode = false;
     turnNinety(1);
   } else if (cmd == "S" || cmd == "STOP") {
     stopAll();
@@ -650,6 +707,17 @@ void handleCommand(String cmd) {
     }
   } else if (cmd == "STATUS") {
     printStatus();
+  } else if (cmd == "GPS STATUS") {
+    printGpsStatus();
+  } else if (cmd == "GPS ONLY ON") {
+    gpsOnlyMode = true;
+    stopAll();
+    Serial.println("ACK:GPS_ONLY|enabled=1");
+    printGpsStatus();
+  } else if (cmd == "GPS ONLY OFF") {
+    gpsOnlyMode = false;
+    Serial.println("ACK:GPS_ONLY|enabled=0");
+    printStatus();
   } else if (cmd == "HELP") {
     printHelp();
   } else {
@@ -661,6 +729,7 @@ void handleCommand(String cmd) {
 
 void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
+  Serial2.begin(GPS_BAUD_RATE);
   Serial.setTimeout(100);
 
   pinMode(M1_RPWM, OUTPUT);
@@ -701,10 +770,22 @@ void setup() {
 
   Serial.print("READY:Combined_RoboScan_controller|baud=");
   Serial.println(SERIAL_BAUD_RATE);
+  Serial.print("READY:GPS_Serial2|baud=");
+  Serial.println(GPS_BAUD_RATE);
   printHelp();
 }
 
 void loop() {
+  updateGps();
+
+  if (gpsOnlyMode) {
+    printStatusIfDue();
+    if (Serial.available() > 0) {
+      handleCommand(Serial.readStringUntil('\n'));
+    }
+    return;
+  }
+
   updateMeasuredSpeed();
   updateDriveControl();
   updatePlotter();

@@ -66,6 +66,13 @@ export interface BridgeStats {
   current_target_idx?: number;
   scripted_step_idx?: number;
   last_command?: string;
+  last_command_sent?: boolean | null;
+  last_raw?: string;
+  last_parsed_at?: string | null;
+  telemetry_fps?: number;
+  telemetry_packets?: number;
+  latest_ack?: string;
+  latest_error?: string;
   autonomous_note?: string;
 }
 
@@ -170,6 +177,8 @@ type BridgePayload = {
   arduino?: Record<string, unknown> | null;
   raw?: string;
   stats?: BridgeStats;
+  ack?: { type?: 'ack'; message?: string };
+  error?: { type?: 'error'; message?: string };
 };
 
 const DEFAULT_GPS: GPSData = { lat: 30.0444, lng: 31.2357, speed: 0, heading: 0, fix: false, accuracy: 999, timestamp: 0 };
@@ -378,15 +387,25 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const handleArduinoPayload = useCallback((arduino: Record<string, unknown>) => {
     const now = Date.now();
-    const lat = numberFrom(arduino, ['lat', 'latitude', 'gps_lat', 'la'], DEFAULT_GPS.lat);
-    const lng = numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], DEFAULT_GPS.lng);
-    const gpsFix = boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], false);
+    const hasGpsFields = hasAny(arduino, [
+      'lat', 'latitude', 'gps_lat', 'la',
+      'lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo',
+      'fix', 'gps_fix', 'gpsFix', 'g',
+      'gps_speed', 'gpsSpeed', 'gps_heading', 'gpsHeading', 'gps_hdop', 'hdop',
+    ]);
+    const hasGpsFix = hasAny(arduino, ['fix', 'gps_fix', 'gpsFix', 'g']);
     const heading = numberFrom(arduino, ['heading', 'yaw', 'compass', 'h'], 0);
-    const speed = numberFrom(arduino, ['speed', 'gps_speed', 'linearVelocity', 'linear_velocity', 'v'], 0);
-    const accuracy = numberFrom(arduino, ['accuracy', 'gps_accuracy', 'hdop', 'hd'], 999);
-    const nextGps: GPSData = { lat, lng, speed, heading, fix: gpsFix, accuracy, timestamp: now };
-    setGps(nextGps);
-    setGpsLive(gpsFix || hasAny(arduino, ['lat', 'latitude', 'lng', 'lon', 'longitude', 'gps_fix', 'la', 'lo', 'g']));
+    const gpsHeading = numberFrom(arduino, ['gps_heading', 'gpsHeading', 'course'], heading);
+    const gpsSpeed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], 0);
+    setGps((prev) => {
+      const gpsFix = hasGpsFix ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], prev.fix) : prev.fix;
+      const lat = gpsFix ? numberFrom(arduino, ['lat', 'latitude', 'gps_lat', 'la'], prev.lat) : prev.lat;
+      const lng = gpsFix ? numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], prev.lng) : prev.lng;
+      const speed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], prev.speed);
+      const accuracy = numberFrom(arduino, ['accuracy', 'gps_accuracy', 'gps_hdop', 'hdop', 'hd'], prev.accuracy);
+      return { lat, lng, speed, heading: gpsHeading, fix: gpsFix, accuracy, timestamp: hasGpsFields ? now : prev.timestamp };
+    });
+    setGpsLive((prev) => hasGpsFields ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], prev) || hasAny(arduino, ['lat', 'latitude', 'lng', 'lon', 'longitude', 'la', 'lo']) : prev);
 
     setImu({
       roll: numberFrom(arduino, ['roll'], 0),
@@ -406,7 +425,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const rightTicks = numberFrom(arduino, ['rightTicks', 'right_ticks', 'encoder_right', 'right', 'e2'], 0);
     const leftRPM = numberFrom(arduino, ['leftRPM', 'left_rpm', 'de1', 'ls'], 0);
     const rightRPM = numberFrom(arduino, ['rightRPM', 'right_rpm', 'de2', 'rs'], 0);
-    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed', 'v'], speed);
+    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed', 'v'], gpsSpeed);
     const odometryError = numberFrom(arduino, ['odometryError', 'odometry_error', 'odom_error'], 0);
     setEncoders((prev) => ({
       leftTicks,
@@ -444,11 +463,22 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       const payload = parseBridgePayload(event.data);
       if (!payload) return;
       if (payload.stats) {
-        setBridgeStats(payload.stats);
+        setBridgeStats({
+          ...payload.stats,
+          latest_ack: payload.ack?.message,
+          latest_error: payload.error?.message,
+        });
         setCameraLive(Boolean(payload.stats.camera_connected || payload.stats.camera_has_frame));
         if (payload.stats.path_status) setPathExecStatus(payload.stats.path_status);
         if (typeof payload.stats.current_target_idx === 'number') setCurrentTargetIdx(payload.stats.current_target_idx);
         if (typeof payload.stats.scripted_step_idx === 'number') setScriptedStepIdx(payload.stats.scripted_step_idx);
+      }
+      if ((payload.ack || payload.error) && !payload.stats) {
+        setBridgeStats((prev) => ({
+          ...(prev ?? {}),
+          latest_ack: payload.ack?.message ?? prev?.latest_ack,
+          latest_error: payload.error?.message ?? prev?.latest_error,
+        }));
       }
       const arduinoPayload = payload.arduino ?? parseCompactArduinoStatus(payload.raw);
       if (arduinoPayload) handleArduinoPayload(arduinoPayload);
