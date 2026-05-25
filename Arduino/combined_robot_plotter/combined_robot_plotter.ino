@@ -172,6 +172,9 @@ bool navQueueActive = false;
 bool navDrivingSegment = false;
 bool navHeadingAdjusting = false;
 bool navTurnActive = false;
+bool navInitialHeadingSampled = false;
+bool navInitialTurnComplete = false;
+float navInitialHeadingErrorDeg = 0.0;
 long navSegmentStartLeftTicks = 0;
 long navSegmentStartRightTicks = 0;
 float navSegmentTargetM = 0.0;
@@ -573,15 +576,18 @@ void updateDriveControl() {
 
   long leftDelta = leftTicks - driveStartLeftTicks;
   long rightDelta = rightTicks - driveStartRightTicks;
-  float currentHeading = readHeading();
-  float hError = headingError(driveTargetHeading, currentHeading);
+  float hError = 0.0;
+  if (!navDrivingSegment) {
+    float currentHeading = readHeading();
+    hError = headingError(driveTargetHeading, currentHeading);
+    lastHeadingErrorDeg = hError;
+  }
   float encoderError = (float)(leftDelta - rightDelta);
   encoderPidIntegral = constrain(encoderPidIntegral + encoderError, -2000.0, 2000.0);
   float encoderDerivative = encoderError - encoderPidLastError;
   encoderPidLastError = encoderError;
   int encoderPidOutput = constrain((int)((encoderError * encoderPidKp) + (encoderPidIntegral * encoderPidKi) + (encoderDerivative * encoderPidKd)), -DRIVE_TRIM_LIMIT, DRIVE_TRIM_LIMIT);
   int trim = constrain((int)(hError * DRIVE_HEADING_KP) + encoderPidOutput, -DRIVE_TRIM_LIMIT, DRIVE_TRIM_LIMIT);
-  lastHeadingErrorDeg = hError;
   lastHeadingCorrection = trim;
   lastEncoderErrorTicks = encoderError;
   lastEncoderPidOutput = encoderPidOutput;
@@ -689,6 +695,9 @@ void clearNavigationState(bool arrived) {
   navDrivingSegment = false;
   navHeadingAdjusting = false;
   navTurnActive = false;
+  navInitialHeadingSampled = false;
+  navInitialTurnComplete = false;
+  navInitialHeadingErrorDeg = 0.0;
   navTurnExpectedTicks = 0;
   navTurnDirection = 0;
   lastTargetDistanceM = 0.0;
@@ -709,6 +718,9 @@ void clearWaypointQueue() {
   navDrivingSegment = false;
   navHeadingAdjusting = false;
   navTurnActive = false;
+  navInitialHeadingSampled = false;
+  navInitialTurnComplete = false;
+  navInitialHeadingErrorDeg = 0.0;
   navTurnExpectedTicks = 0;
   navTurnDirection = 0;
   lastTargetDistanceM = 0.0;
@@ -746,9 +758,11 @@ void loadActiveWaypoint() {
   navDrivingSegment = false;
   navHeadingAdjusting = false;
   navTurnActive = false;
+  navInitialHeadingSampled = false;
+  navInitialTurnComplete = false;
+  navInitialHeadingErrorDeg = 0.0;
   navTurnExpectedTicks = 0;
   navTurnDirection = 0;
-  driveTargetHeading = readHeading();
   readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
   resetEncoderPid();
 }
@@ -770,9 +784,11 @@ void startNavigation(double targetLat, double targetLng) {
   navDrivingSegment = false;
   navHeadingAdjusting = false;
   navTurnActive = false;
+  navInitialHeadingSampled = false;
+  navInitialTurnComplete = false;
+  navInitialHeadingErrorDeg = 0.0;
   navTurnExpectedTicks = 0;
   navTurnDirection = 0;
-  driveTargetHeading = readHeading();
   readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
   resetEncoderPid();
 
@@ -832,10 +848,17 @@ void beginNavigationTurn(float headingErrorDeg) {
 }
 
 bool updateNavigationTurn(float headingErrorDeg) {
+  if (abs(headingErrorDeg) <= HEADING_TOLERANCE_DEG) {
+    navTurnActive = false;
+    navHeadingAdjusting = false;
+    navTurnExpectedTicks = 0;
+    return true;
+  }
+
   if (!navTurnActive) beginNavigationTurn(headingErrorDeg);
 
   long encoderDelta = navTurnEncoderDelta();
-  if (abs(headingErrorDeg) <= HEADING_TOLERANCE_DEG) {
+  if (navTurnExpectedTicks > 0 && encoderDelta >= navTurnExpectedTicks) {
     stopDrive();
     navTurnActive = false;
     navHeadingAdjusting = false;
@@ -906,26 +929,48 @@ void updateNavigation() {
   double currentLng = gps.location.lng();
   float distanceM = gpsDistanceMeters(currentLat, currentLng, navTargetLat, navTargetLng);
   float bearingDeg = gpsBearingDegrees(currentLat, currentLng, navTargetLat, navTargetLng);
-  float currentHeading = readHeading();
-  float hError = headingError(bearingDeg, currentHeading);
 
   lastTargetDistanceM = distanceM;
   lastTargetBearingDeg = bearingDeg;
-  lastHeadingErrorDeg = hError;
 
   if (distanceM <= NAV_ARRIVAL_TOLERANCE_M) {
+    stopDrive();
     advanceWaypointOrStop(distanceM);
     return;
   }
 
-  driveTargetHeading = bearingDeg;
+  if (navDrivingSegment) {
+    int navSpeed = cappedDrivePwm(driveSpeed);
+    if (distanceM < NAV_SLOWDOWN_DISTANCE_M) {
+      navSpeed = map((int)(distanceM * 100.0), (int)(NAV_ARRIVAL_TOLERANCE_M * 100.0), (int)(NAV_SLOWDOWN_DISTANCE_M * 100.0), MIN_TURN_PWM, cappedDrivePwm(driveSpeed));
+    }
+    int minForwardPwm = min(MIN_TURN_PWM, cappedDrivePwm(driveSpeed));
+    activeDriveSpeed = constrain(navSpeed, minForwardPwm, cappedDrivePwm(driveSpeed));
 
-  if (navTurnActive || abs(hError) > NAV_HEADING_ADJUST_DEG) {
-    updateNavigationTurn(hError);
+    if (!driveIsMoving || driveDirection != 1) {
+      beginForwardMotion(activeDriveSpeed);
+    }
+    return;
+  }
+
+  if (!navInitialHeadingSampled) {
+    float initialHeading = readHeading();
+    navInitialHeadingErrorDeg = headingError(bearingDeg, initialHeading);
+    navInitialHeadingSampled = true;
+    navInitialTurnComplete = abs(navInitialHeadingErrorDeg) <= HEADING_TOLERANCE_DEG;
+    lastHeadingErrorDeg = navInitialHeadingErrorDeg;
+  }
+
+  if (!navInitialTurnComplete && (navTurnActive || abs(navInitialHeadingErrorDeg) > HEADING_TOLERANCE_DEG)) {
+    if (!updateNavigationTurn(navInitialHeadingErrorDeg)) {
+      return;
+    }
+    navInitialTurnComplete = true;
     return;
   }
 
   navHeadingAdjusting = false;
+  driveTargetHeading = bearingDeg;
   int navSpeed = cappedDrivePwm(driveSpeed);
   if (distanceM < NAV_SLOWDOWN_DISTANCE_M) {
     navSpeed = map((int)(distanceM * 100.0), (int)(NAV_ARRIVAL_TOLERANCE_M * 100.0), (int)(NAV_SLOWDOWN_DISTANCE_M * 100.0), MIN_TURN_PWM, cappedDrivePwm(driveSpeed));
@@ -933,23 +978,11 @@ void updateNavigation() {
   int minForwardPwm = min(MIN_TURN_PWM, cappedDrivePwm(driveSpeed));
   navSpeed = constrain(navSpeed, minForwardPwm, cappedDrivePwm(driveSpeed));
 
-  if (!navDrivingSegment) {
-    readEncoderTicks(navSegmentStartLeftTicks, navSegmentStartRightTicks);
-    navSegmentTargetM = min(NAV_ENCODER_STEP_M, max(0.10, distanceM - NAV_ARRIVAL_TOLERANCE_M));
-    navDrivingSegment = true;
-    resetEncoderPid();
-  }
-
-  if (navSegmentTravelDistanceM() >= navSegmentTargetM) {
-    stopDrive();
-    navDrivingSegment = false;
-    return;
-  }
-
-  if (!driveIsMoving || driveDirection != 1) {
-    beginForwardMotion(navSpeed);
-  }
-  activeDriveSpeed = navSpeed;
+  readEncoderTicks(navSegmentStartLeftTicks, navSegmentStartRightTicks);
+  navSegmentTargetM = max(0.10, distanceM - NAV_ARRIVAL_TOLERANCE_M);
+  navDrivingSegment = true;
+  resetEncoderPid();
+  beginForwardMotion(navSpeed);
 }
 
 void printStatus() {
@@ -1157,6 +1190,11 @@ void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
   cmd.toUpperCase();
+
+  if (navActive && (cmd == "W" || cmd == "X" || cmd == "A" || cmd == "D")) {
+    Serial.println("WARN:NAV_ACTIVE_MANUAL_MOVE_IGNORED");
+    return;
+  }
 
   if (cmd == "W") {
     gpsOnlyMode = false;
