@@ -255,6 +255,9 @@ const MIN_COMMAND_PWM = 1;
 const MAX_COMMAND_PWM = 255;
 const DEFAULT_ROBOT_SPEED_CAP = 0.4;
 const POTHOME_DUPLICATE_DISTANCE_M = 2;
+const GPS_GLITCH_DISTANCE_M = 1000;
+const GPS_DEFAULT_REJECT_DISTANCE_M = 50;
+const WAYPOINT_COMMAND_INTERVAL_MS = 150;
 const DEFAULT_CAMERA_CALIBRATION: CameraCalibration = {
   heightCm: 35,
   tiltDeg: 35,
@@ -353,6 +356,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const latestTelemetryRef = useRef<Record<string, unknown> | null>(null);
   const lastTelemetryReportAtRef = useRef(0);
   const lastAckMessageRef = useRef('');
+  const gpsPausedPlotterRef = useRef(false);
+  const waypointCommandTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
     latestRef.current = { gps, imu, encoders };
@@ -426,6 +431,22 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify(payload ? { type: command, ...payload } : { type: command }));
   }, []);
+
+  const clearQueuedWaypointCommands = useCallback(() => {
+    waypointCommandTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    waypointCommandTimersRef.current = [];
+  }, []);
+
+  const queueWaypointCommands = useCallback((commands: Array<{ command: string; payload?: Record<string, unknown> }>) => {
+    clearQueuedWaypointCommands();
+    commands.forEach(({ command, payload }, index) => {
+      const timer = window.setTimeout(() => {
+        sendCommand(command, payload);
+        waypointCommandTimersRef.current = waypointCommandTimersRef.current.filter((queuedTimer) => queuedTimer !== timer);
+      }, index * WAYPOINT_COMMAND_INTERVAL_MS);
+      waypointCommandTimersRef.current.push(timer);
+    });
+  }, [clearQueuedWaypointCommands, sendCommand]);
 
   const capSpeed = useCallback((speed: number) => clampSpeed(speed, robotSpeedCap), [robotSpeedCap]);
 
@@ -587,6 +608,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const now = Date.now();
     latestTelemetryRef.current = arduino;
     setArduinoTelemetry(arduino);
+    const hasLat = hasAny(arduino, ['lat', 'latitude', 'gps_lat', 'la']);
+    const hasLng = hasAny(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo']);
     const hasGpsFields = hasAny(arduino, [
       'lat', 'latitude', 'gps_lat', 'la',
       'lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo',
@@ -602,15 +625,48 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         ? normalizeDegrees(rawCompassHeading + compassOffset)
         : latestRef.current.gps.heading;
     const gpsSpeed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], 0);
-    setGps((prev) => {
-      const gpsFix = hasGpsFix ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], prev.fix) : prev.fix;
-      const lat = gpsFix ? numberFrom(arduino, ['lat', 'latitude', 'gps_lat', 'la'], prev.lat) : prev.lat;
-      const lng = gpsFix ? numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], prev.lng) : prev.lng;
-      const speed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], prev.speed);
-      const accuracy = numberFrom(arduino, ['accuracy', 'gps_accuracy', 'gps_hdop', 'hdop', 'hd'], prev.accuracy);
-      return { lat, lng, speed, heading, fix: gpsFix, accuracy, timestamp: hasGpsFields ? now : prev.timestamp };
+    const moving = boolFrom(arduino, ['drive_moving', 'moving'], false)
+      || Math.abs(numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed', 'v'], gpsSpeed)) > 0.01
+      || Math.abs(gpsSpeed) > 0.01;
+    const previousGps = latestRef.current.gps;
+    const reportedFix = hasGpsFix ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], false) : previousGps.fix;
+    const candidateLat = numberFrom(arduino, ['lat', 'latitude', 'gps_lat', 'la'], Number.NaN);
+    const candidateLng = numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], Number.NaN);
+    const hasCoordinate = hasLat && hasLng && isValidGpsCoordinate(candidateLat, candidateLng);
+    const distanceFromLast = hasCoordinate ? distanceMeters(previousGps.lat, previousGps.lng, candidateLat, candidateLng) : 0;
+    const candidateLooksDefault = hasCoordinate && distanceMeters(candidateLat, candidateLng, DEFAULT_GPS.lat, DEFAULT_GPS.lng) <= GPS_DEFAULT_REJECT_DISTANCE_M;
+    const isJumpGlitch = previousGps.timestamp > 0 && hasCoordinate && distanceFromLast > GPS_GLITCH_DISTANCE_M;
+    const isDefaultGlitch = previousGps.timestamp > 0 && candidateLooksDefault && distanceFromLast > GPS_DEFAULT_REJECT_DISTANCE_M;
+    const acceptedGpsFix = hasGpsFix && !reportedFix
+      ? false
+      : hasCoordinate
+        ? reportedFix && !isJumpGlitch && !isDefaultGlitch
+        : previousGps.fix;
+    const acceptedCoordinate = acceptedGpsFix && hasCoordinate;
+    setGps({
+      lat: acceptedCoordinate ? candidateLat : previousGps.lat,
+      lng: acceptedCoordinate ? candidateLng : previousGps.lng,
+      speed: acceptedGpsFix ? numberFrom(arduino, ['gps_speed', 'gpsSpeed'], previousGps.speed) : 0,
+      heading,
+      fix: acceptedGpsFix,
+      accuracy: acceptedGpsFix ? numberFrom(arduino, ['accuracy', 'gps_accuracy', 'gps_hdop', 'hdop', 'hd'], previousGps.accuracy) : previousGps.accuracy,
+      timestamp: acceptedCoordinate ? now : previousGps.timestamp,
     });
-    setGpsLive((prev) => hasGpsFields ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], prev) || hasAny(arduino, ['lat', 'latitude', 'lng', 'lon', 'longitude', 'la', 'lo']) : prev);
+    setGpsLive((prev) => hasGpsFields ? acceptedGpsFix : prev);
+
+    if (!acceptedGpsFix && painting.active && !gpsPausedPlotterRef.current) {
+      sendCommand('plot', { mode: 'off' });
+      gpsPausedPlotterRef.current = true;
+      setPaintingState((prev) => ({ ...prev, status: 'idle' }));
+    } else if (acceptedGpsFix && moving && gpsPausedPlotterRef.current && painting.active) {
+      sendCommand('plot', {
+        mode: painting.mode === 'dashed' ? 'dash_dist' : 'cont',
+        dash_m: painting.dashLength,
+        gap_m: painting.gapLength,
+      });
+      gpsPausedPlotterRef.current = false;
+      setPaintingState((prev) => ({ ...prev, status: 'active' }));
+    }
 
     setImu((prev) => ({
       roll: numberFrom(arduino, ['roll'], prev.roll),
@@ -664,7 +720,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         timestamp: now,
       });
     }
-  }, [appendReportEvent, battery, compassOffset, currentTargetIdx, hostname, pathExecStatus, segmentDistance, totalDistance]);
+  }, [appendReportEvent, battery, compassOffset, currentTargetIdx, hostname, painting.active, painting.dashLength, painting.gapLength, painting.mode, pathExecStatus, segmentDistance, sendCommand, totalDistance]);
 
   const connect = useCallback(() => {
     const host = connectionIp.trim();
@@ -799,33 +855,36 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     }
     const cappedMaxSpeed = capSpeed(route?.maxSpeed ?? autonomousMaxSpeed);
     setCurrentTargetIdx(0);
-    sendCommand('speed', { speed: normalizedSpeedToPwm(cappedMaxSpeed) });
-    sendCommand('auto_turn_speed', { speed: normalizedSpeedToPwm(autoTurnSpeed) });
-    sendCommand('speed_cap', { speed: normalizedSpeedToPwm(robotSpeedCap) });
-    sendCommand('wp_clear');
-    routePoints.forEach((point, order) => {
-      sendCommand('wp_add', { order, lat: point.lat, lng: point.lng });
-    });
-    sendCommand('wp_start');
+    queueWaypointCommands([
+      { command: 'speed', payload: { speed: normalizedSpeedToPwm(cappedMaxSpeed) } },
+      { command: 'auto_turn_speed', payload: { speed: normalizedSpeedToPwm(autoTurnSpeed) } },
+      { command: 'speed_cap', payload: { speed: normalizedSpeedToPwm(robotSpeedCap) } },
+      { command: 'wp_clear' },
+      ...routePoints.map((point, order) => ({ command: 'wp_add', payload: { order, lat: point.lat, lng: point.lng } })),
+      { command: 'wp_start' },
+    ]);
     appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${cappedMaxSpeed}m/s` });
-  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, robotSpeedCap, sendCommand, waypoints]);
+  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, queueWaypointCommands, robotSpeedCap, waypoints]);
 
   const pausePath = useCallback(() => {
+    clearQueuedWaypointCommands();
     setPathExecStatus('paused');
     sendCommand('wp_stop');
-  }, [sendCommand]);
+  }, [clearQueuedWaypointCommands, sendCommand]);
 
   const stopPath = useCallback(() => {
+    clearQueuedWaypointCommands();
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
     sendCommand('wp_stop');
-  }, [sendCommand]);
+  }, [clearQueuedWaypointCommands, sendCommand]);
 
   const resetPath = useCallback(() => {
+    clearQueuedWaypointCommands();
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
     sendCommand('wp_stop');
-  }, [sendCommand]);
+  }, [clearQueuedWaypointCommands, sendCommand]);
 
   const setScriptedMove = useCallback((move: Partial<ScriptedMove>) => {
     setScriptedMoveState((prev) => ({ ...prev, ...move, speed: move.speed === undefined ? prev.speed : capSpeed(move.speed) }));
@@ -1117,6 +1176,10 @@ function normalizeDegrees(value: number): number {
 function normalizeSignedDegrees(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return ((((value % 360) + 540) % 360) - 180);
+}
+
+function isValidGpsCoordinate(lat: number, lng: number): boolean {
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
 }
 
 function sanitizeCameraCalibration(value: CameraCalibration): CameraCalibration {
