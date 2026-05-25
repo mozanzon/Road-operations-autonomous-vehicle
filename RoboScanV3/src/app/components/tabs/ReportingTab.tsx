@@ -1,71 +1,72 @@
 import React, { useMemo, useState } from 'react';
 import { BarChart2, Calendar, Download, FileText, TestTube2 } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { useRobot, ReportEvent } from '../../context/RobotContext';
+import { useRobot, ReportEvent, ReportSession } from '../../context/RobotContext';
+
+const EGYPT_TIME_ZONE = 'Africa/Cairo';
 
 export function ReportingTab() {
-  const { reportEvents, detections } = useRobot();
+  const { reportEvents, detections, reportSessions, activeSession } = useRobot();
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [sessionFilter, setSessionFilter] = useState('all');
+
+  const selectedSessions = useMemo(() => {
+    if (sessionFilter === 'all') return reportSessions;
+    if (sessionFilter === 'active') return activeSession ? [activeSession] : [];
+    return reportSessions.filter((session) => session.id === sessionFilter);
+  }, [activeSession, reportSessions, sessionFilter]);
+
+  const selectedSessionIds = useMemo(() => new Set(selectedSessions.map((session) => session.id)), [selectedSessions]);
 
   const filteredEvents = useMemo(() => {
     return reportEvents.filter((event) => {
-      const day = new Date(event.timestamp).toISOString().slice(0, 10);
+      const day = egyptDateKey(event.timestamp);
       if (dateFrom && day < dateFrom) return false;
       if (dateTo && day > dateTo) return false;
-      return true;
+      if (sessionFilter === 'all') return true;
+      return Boolean(event.sessionId && selectedSessionIds.has(event.sessionId));
     });
-  }, [dateFrom, dateTo, reportEvents]);
+  }, [dateFrom, dateTo, reportEvents, selectedSessionIds, sessionFilter]);
 
   const summary = useMemo(() => {
     const potholes = filteredEvents.filter((event) => event.label === 'pothole').length;
     const cracks = filteredEvents.filter((event) => event.label === 'crack').length;
     const manual = filteredEvents.filter((event) => event.kind === 'manual-reading').length;
+    const telemetry = filteredEvents.filter((event) => event.kind === 'telemetry').length;
     const tests = filteredEvents.filter((event) => event.source === 'test').length;
-    return { potholes, cracks, manual, tests };
+    return { potholes, cracks, manual, telemetry, tests };
   }, [filteredEvents]);
 
   const chartData = [
     { name: 'Potholes', count: summary.potholes },
     { name: 'Cracks', count: summary.cracks },
     { name: 'Manual', count: summary.manual },
+    { name: 'Telemetry', count: summary.telemetry },
     { name: 'Test', count: summary.tests },
   ];
 
-  const exportCSV = () => {
-    const rows = [
-      ['Timestamp', 'Kind', 'Label', 'Source', 'Confidence', 'Lat', 'Lng', 'Heading', 'Velocity', 'Details'],
-      ...filteredEvents.map((event) => [
-        new Date(event.timestamp).toISOString(),
-        event.kind,
-        event.label,
-        event.source,
-        event.confidence ?? '',
-        event.gps.lat,
-        event.gps.lng,
-        event.gps.heading,
-        event.encoders.linearVelocity,
-        event.details ?? '',
-      ]),
-    ];
-    const csv = rows.map((row) => row.map(csvCell).join(',')).join('\n');
-    downloadBlob(csv, `roboscan-report-${Date.now()}.csv`, 'text/csv');
+  const exportWorkbook = () => {
+    const workbook = buildWorkbook(filteredEvents, selectedSessions, summary);
+    downloadBlob(workbook, `roboscan-${exportScopeName(sessionFilter, activeSession)}-${egyptFilenameStamp(Date.now())}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   };
 
   const exportTextReport = () => {
     const lines = [
       'ROBOSCAN REAL RUN REPORT',
       '='.repeat(32),
-      `Generated: ${new Date().toLocaleString()}`,
+      `Generated: ${formatEgyptDateTime(Date.now())} Egypt time`,
+      `Session scope: ${sessionLabel(sessionFilter, activeSession)}`,
       `Events: ${filteredEvents.length}`,
       `Potholes: ${summary.potholes}`,
       `Cracks: ${summary.cracks}`,
       `Manual readings: ${summary.manual}`,
+      `Telemetry rows: ${summary.telemetry}`,
       `Test records: ${summary.tests}`,
       '',
       ...filteredEvents.map(formatEvent),
     ];
-    downloadBlob(lines.join('\n'), `roboscan-report-${Date.now()}.txt`, 'text/plain');
+    downloadBlob(lines.join('\n'), `roboscan-${exportScopeName(sessionFilter, activeSession)}-${egyptFilenameStamp(Date.now())}.txt`, 'text/plain');
   };
 
   return (
@@ -76,14 +77,21 @@ export function ReportingTab() {
             <BarChart2 className="h-4 w-4 text-amber-400" /> Real Inspection Report
           </h3>
           <div className="flex flex-wrap items-center gap-3">
+            <select value={sessionFilter} onChange={(event) => setSessionFilter(event.target.value)} className="rounded border border-slate-600 bg-slate-800 px-2 py-2 text-xs font-mono text-slate-300 focus:border-amber-500 focus:outline-none">
+              <option value="all">All sessions</option>
+              <option value="active" disabled={!activeSession}>Active session</option>
+              {reportSessions.map((session) => (
+                <option key={session.id} value={session.id}>{session.id}</option>
+              ))}
+            </select>
             <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
               <Calendar className="h-3.5 w-3.5" />
               <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-slate-300 focus:border-amber-500 focus:outline-none" />
               <span>to</span>
               <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-slate-300 focus:border-amber-500 focus:outline-none" />
             </div>
-            <button onClick={exportCSV} className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-300 hover:bg-slate-700">
-              <Download className="h-3.5 w-3.5" /> CSV
+            <button onClick={exportWorkbook} className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-300 hover:bg-slate-700">
+              <Download className="h-3.5 w-3.5" /> XLSX
             </button>
             <button onClick={exportTextReport} className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-300 hover:bg-slate-700">
               <FileText className="h-3.5 w-3.5" /> Report
@@ -92,11 +100,12 @@ export function ReportingTab() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <Summary label="Events" value={filteredEvents.length} />
         <Summary label="Potholes" value={summary.potholes} color="text-orange-400" />
         <Summary label="Cracks" value={summary.cracks} color="text-yellow-400" />
         <Summary label="Manual" value={summary.manual} color="text-blue-400" />
+        <Summary label="Telemetry" value={summary.telemetry} color="text-cyan-400" />
         <Summary label="Test" value={summary.tests} color="text-purple-400" />
       </div>
 
@@ -121,7 +130,7 @@ export function ReportingTab() {
           <table className="w-full text-xs font-mono">
             <thead>
               <tr className="border-b border-slate-700/60 bg-slate-800/50">
-                {['Time', 'Kind', 'Label', 'Source', 'Location', 'Sensors', 'Details'].map((header) => (
+                {['Egypt Time', 'Kind', 'Label', 'Session', 'Source', 'Location', 'Sensors', 'Details'].map((header) => (
                   <th key={header} className="whitespace-nowrap px-4 py-3 text-left font-semibold uppercase tracking-wider text-slate-400">{header}</th>
                 ))}
               </tr>
@@ -129,9 +138,10 @@ export function ReportingTab() {
             <tbody>
               {filteredEvents.map((event) => (
                 <tr key={event.id} className="border-b border-slate-700/30">
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-300">{new Date(event.timestamp).toLocaleString()}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-slate-300">{formatEgyptDateTime(event.timestamp)}</td>
                   <td className="px-4 py-3 text-slate-300">{event.kind}</td>
                   <td className="px-4 py-3 text-amber-400">{event.label}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-slate-400">{event.sessionId ?? ''}</td>
                   <td className="px-4 py-3">
                     <span className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 ${event.source === 'test' ? 'border-purple-500/40 bg-purple-500/10 text-purple-300' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>
                       {event.source === 'test' ? <TestTube2 className="h-3 w-3" /> : null}
@@ -139,7 +149,7 @@ export function ReportingTab() {
                     </span>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-slate-400">{event.gps.lat.toFixed(5)}, {event.gps.lng.toFixed(5)}</td>
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-400">H {event.gps.heading.toFixed(1)} deg · V {event.encoders.linearVelocity.toFixed(2)} m/s</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-slate-400">C {event.gps.heading.toFixed(1)} deg · V {event.encoders.linearVelocity.toFixed(2)} m/s</td>
                   <td className="px-4 py-3 text-slate-400">{event.details ?? ''}</td>
                 </tr>
               ))}
@@ -148,13 +158,13 @@ export function ReportingTab() {
         </div>
         {filteredEvents.length === 0 && (
           <div className="py-10 text-center text-xs font-mono text-slate-500">
-            No real or test report events recorded yet. Use Record reading, Testing camera, or Inject sample in Operations.
+            No report events match the selected session and Egypt-time date range.
           </div>
         )}
       </div>
 
       <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 text-xs font-mono text-slate-500">
-        Current detection cache: {detections.length} items. Test-generated records are visibly marked and exported with source=test.
+        Current detection cache: {detections.length} items. Sessions saved: {reportSessions.length}. Active session: {activeSession ? activeSession.id : 'none'}.
       </div>
     </div>
   );
@@ -171,20 +181,263 @@ function Summary({ label, value, color = 'text-slate-100' }: { label: string; va
 
 function formatEvent(event: ReportEvent) {
   return [
-    `${new Date(event.timestamp).toLocaleString()} | ${event.kind} | ${event.label} | ${event.source}`,
+    `${formatEgyptDateTime(event.timestamp)} Egypt | ${event.kind} | ${event.label} | ${event.source}`,
+    `Session: ${event.sessionId ?? ''}`,
     `GPS: ${event.gps.lat.toFixed(6)}, ${event.gps.lng.toFixed(6)} fix=${event.gps.fix} accuracy=${event.gps.accuracy.toFixed(2)}m`,
-    `Heading: ${event.gps.heading.toFixed(2)} deg | Velocity: ${event.encoders.linearVelocity.toFixed(2)} m/s`,
+    `Compass: ${event.gps.heading.toFixed(2)} deg | Velocity: ${event.encoders.linearVelocity.toFixed(2)} m/s`,
     event.details ? `Details: ${event.details}` : '',
     '-'.repeat(32),
   ].filter(Boolean).join('\n');
 }
 
-function csvCell(value: unknown) {
-  const text = String(value);
-  return `"${text.replace(/"/g, '""')}"`;
+function buildWorkbook(events: ReportEvent[], sessions: ReportSession[], summary: { potholes: number; cracks: number; manual: number; telemetry: number; tests: number }) {
+  const overviewRows = [
+    ['Metric', 'Value'],
+    ['Generated Egypt Time', formatEgyptDateTime(Date.now())],
+    ['Events', events.length],
+    ['Potholes', summary.potholes],
+    ['Cracks', summary.cracks],
+    ['Manual readings', summary.manual],
+    ['Telemetry rows', summary.telemetry],
+    ['Test records', summary.tests],
+    ['Sessions in export', sessions.length],
+    ['GPS fix rows', events.filter((event) => event.gps.fix).length],
+    ['Plot active rows', events.filter((event) => event.plotActive).length],
+    ['Total moved distance max', Math.max(0, ...events.map((event) => event.totalMovedDistance ?? 0))],
+    [],
+    ['Session ID', 'Mode', 'Started Egypt Time', 'Ended Egypt Time', 'Duration s'],
+    ...sessions.map((session) => [
+      session.id,
+      session.mode,
+      formatEgyptDateTime(session.startedAt),
+      session.endedAt ? formatEgyptDateTime(session.endedAt) : '',
+      session.endedAt ? Math.round((session.endedAt - session.startedAt) / 1000) : '',
+    ]),
+  ];
+  const detailHeaders = [
+    'Egypt Timestamp', 'Unix Timestamp ms', 'Session ID', 'Event Type', 'Label', 'Message', 'Source', 'Mode',
+    'GPS Fix', 'Latitude', 'Longitude', 'Compass Heading', 'GPS Course', 'GPS Speed', 'GPS Accuracy',
+    'IMU Roll', 'IMU Pitch', 'IMU Yaw', 'Accel X', 'Accel Y', 'Accel Z', 'Gyro X', 'Gyro Y', 'Gyro Z',
+    'Left Ticks', 'Right Ticks', 'Left Meters', 'Right Meters', 'Linear Speed',
+    'Motor Motion', 'Drive Moving', 'Drive Speed PWM', 'Active Drive PWM', 'Left PWM', 'Right PWM',
+    'Waypoint Active', 'Waypoint Index', 'Waypoint Count', 'Target Bearing', 'Target Distance (m)', 'Heading Error (deg)',
+    'Heading Adjusting', 'Turn Active', 'Turn Expected Ticks', 'Encoder Error', 'Encoder PID P', 'Encoder PID I', 'Encoder PID D', 'Encoder PID Output',
+    'Plot Mode', 'Plot Active', 'Dash Length (m)', 'Gap Length (m)', 'Plot Target (m)', 'Plotted Dashed (m)', 'Plotted Undashed (m)',
+    'Tracking Error (m)', 'Path Position', 'Total Moved Distance', 'Confidence', 'Raw Telemetry',
+  ];
+  const detailRows = [
+    detailHeaders,
+    ...events.map((event) => [
+      formatEgyptDateTime(event.timestamp),
+      event.timestamp,
+      event.sessionId ?? '',
+      event.kind,
+      event.label,
+      event.details || event.label,
+      event.source,
+      event.mode ?? '',
+      event.gps.fix ? 1 : 0,
+      event.gps.lat,
+      event.gps.lng,
+      event.gps.heading,
+      valueFromTelemetry(event, 'gps_course') ?? valueFromTelemetry(event, 'gpsCourse'),
+      event.gps.speed,
+      event.gps.accuracy,
+      event.imu.roll,
+      event.imu.pitch,
+      event.imu.yaw,
+      event.imu.accelX,
+      event.imu.accelY,
+      event.imu.accelZ,
+      event.imu.gyroX,
+      event.imu.gyroY,
+      event.imu.gyroZ,
+      event.encoders.leftTicks,
+      event.encoders.rightTicks,
+      valueFromTelemetry(event, 'left_m'),
+      valueFromTelemetry(event, 'right_m'),
+      event.encoders.linearVelocity,
+      event.motorMotion ?? '',
+      valueFromTelemetry(event, 'drive_moving'),
+      valueFromTelemetry(event, 'drive_speed'),
+      valueFromTelemetry(event, 'active_drive_speed'),
+      valueFromTelemetry(event, 'left_pwm'),
+      valueFromTelemetry(event, 'right_pwm'),
+      valueFromTelemetry(event, 'wp_active'),
+      valueFromTelemetry(event, 'wp_index'),
+      valueFromTelemetry(event, 'wp_count'),
+      valueFromTelemetry(event, 'target_bearing'),
+      valueFromTelemetry(event, 'target_distance_m'),
+      valueFromTelemetry(event, 'heading_error'),
+      valueFromTelemetry(event, 'heading_adjusting'),
+      valueFromTelemetry(event, 'turn_active'),
+      valueFromTelemetry(event, 'turn_expected_ticks'),
+      valueFromTelemetry(event, 'encoder_error'),
+      valueFromTelemetry(event, 'encoder_pid_kp'),
+      valueFromTelemetry(event, 'encoder_pid_ki'),
+      valueFromTelemetry(event, 'encoder_pid_kd'),
+      valueFromTelemetry(event, 'encoder_pid_output'),
+      event.plotMode ?? '',
+      event.plotActive ? 1 : 0,
+      event.dashLengthM ?? '',
+      event.gapLengthM ?? '',
+      valueFromTelemetry(event, 'plot_target_m'),
+      event.plottedDashedM ?? '',
+      event.plottedUndashedM ?? '',
+      event.trackingErrorM ?? '',
+      event.pathPosition ?? '',
+      event.totalMovedDistance ?? '',
+      event.confidence ?? '',
+      event.arduino ? JSON.stringify(event.arduino) : '',
+    ]),
+  ];
+  return createXlsx([
+    { name: 'Overview', rows: overviewRows },
+    { name: 'Details', rows: detailRows },
+  ]);
 }
 
-function downloadBlob(content: string, filename: string, type: string) {
+function valueFromTelemetry(event: ReportEvent, key: string) {
+  const value = event.arduino?.[key];
+  return typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean' ? value : '';
+}
+
+function egyptDateKey(timestamp: number) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: EGYPT_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(timestamp));
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  return `${value('year')}-${value('month')}-${value('day')}`;
+}
+
+function formatEgyptDateTime(timestamp: number) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: EGYPT_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(timestamp));
+}
+
+function egyptFilenameStamp(timestamp: number) {
+  const date = egyptDateKey(timestamp);
+  const time = new Intl.DateTimeFormat('en-GB', {
+    timeZone: EGYPT_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(timestamp)).replace(/:/g, '');
+  return `${date}-${time}-egypt`;
+}
+
+function sessionLabel(value: string, activeSession: ReportSession | null) {
+  if (value === 'all') return 'All sessions';
+  if (value === 'active') return activeSession?.id ?? 'Active session';
+  return value;
+}
+
+function exportScopeName(value: string, activeSession: ReportSession | null) {
+  return sessionLabel(value, activeSession).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '') || 'session';
+}
+
+function createXlsx(sheets: { name: string; rows: unknown[][] }[]) {
+  const files: Record<string, string | Uint8Array> = {
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${sheets.map((_, index) => `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}</Relationships>`,
+  };
+  sheets.forEach((sheet, index) => {
+    files[`xl/worksheets/sheet${index + 1}.xml`] = sheetXml(sheet.rows);
+  });
+  return zipStore(files);
+}
+
+function sheetXml(rows: unknown[][]) {
+  return `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.map((row, rowIndex) => `<row r="${rowIndex + 1}">${row.map((cell, colIndex) => cellXml(cell, rowIndex + 1, colIndex)).join('')}</row>`).join('')}</sheetData></worksheet>`;
+}
+
+function cellXml(value: unknown, row: number, col: number) {
+  const ref = `${columnName(col)}${row}`;
+  if (typeof value === 'number' && Number.isFinite(value)) return `<c r="${ref}"><v>${value}</v></c>`;
+  return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(value ?? '')}</t></is></c>`;
+}
+
+function columnName(index: number) {
+  let name = '';
+  let current = index + 1;
+  while (current > 0) {
+    const mod = (current - 1) % 26;
+    name = String.fromCharCode(65 + mod) + name;
+    current = Math.floor((current - mod) / 26);
+  }
+  return name;
+}
+
+function xmlEscape(value: unknown) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function zipStore(files: Record<string, string | Uint8Array>) {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+  Object.entries(files).forEach(([name, content]) => {
+    const nameBytes = encoder.encode(name);
+    const data = typeof content === 'string' ? encoder.encode(content) : content;
+    const crc = crc32(data);
+    const local = zipHeader(0x04034b50, nameBytes, data.length, crc, offset);
+    localParts.push(local, nameBytes, data);
+    const central = zipHeader(0x02014b50, nameBytes, data.length, crc, offset);
+    centralParts.push(central, nameBytes);
+    offset += local.length + nameBytes.length + data.length;
+  });
+  const centralOffset = offset;
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = new Uint8Array(22);
+  const view = new DataView(end.buffer);
+  view.setUint32(0, 0x06054b50, true);
+  view.setUint16(8, Object.keys(files).length, true);
+  view.setUint16(10, Object.keys(files).length, true);
+  view.setUint32(12, centralSize, true);
+  view.setUint32(16, centralOffset, true);
+  return new Blob([...localParts, ...centralParts, end]);
+}
+
+function zipHeader(signature: number, nameBytes: Uint8Array, size: number, crc: number, offset: number) {
+  const isCentral = signature === 0x02014b50;
+  const bytes = new Uint8Array(isCentral ? 46 : 30);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, signature, true);
+  if (isCentral) view.setUint16(4, 20, true);
+  view.setUint16(isCentral ? 6 : 4, 20, true);
+  view.setUint32(isCentral ? 16 : 14, crc, true);
+  view.setUint32(isCentral ? 20 : 18, size, true);
+  view.setUint32(isCentral ? 24 : 22, size, true);
+  view.setUint16(isCentral ? 28 : 26, nameBytes.length, true);
+  if (isCentral) view.setUint32(42, offset, true);
+  return bytes;
+}
+
+function crc32(data: Uint8Array) {
+  let crc = -1;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ -1) >>> 0;
+}
+
+function downloadBlob(content: BlobPart, filename: string, type: string) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');

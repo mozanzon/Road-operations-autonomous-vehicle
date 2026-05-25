@@ -31,10 +31,13 @@ export interface Detection {
   id: string; type: 'pothole' | 'crack';
   lat: number; lng: number; confidence: number; timestamp: number;
   source?: 'model' | 'manual' | 'test';
+  count?: number;
+  lastSeenAt?: number;
+  mapped?: boolean;
 }
 
 export interface Waypoint {
-  id: string; lat: number; lng: number; order: number;
+  id: string; lat: number; lng: number; order: number; headingOverride?: number | null;
 }
 
 export interface PIDSet { kp: number; ki: number; kd: number; }
@@ -92,10 +95,36 @@ export interface RoutePoint {
   lng: number;
 }
 
+export interface CameraCalibration {
+  heightCm: number;
+  tiltDeg: number;
+  horizontalFovDeg: number;
+  verticalFovDeg: number;
+  streamWidth: number;
+  streamHeight: number;
+  forwardOffsetCm: number;
+}
+
+export interface ImageProcessingSettings {
+  enabled: boolean;
+  brightness: number;
+  contrast: number;
+  gamma: number;
+  autoNormalize: boolean;
+  showProcessed: boolean;
+}
+
+export interface ReportSession {
+  id: string;
+  startedAt: number;
+  endedAt?: number;
+  mode: RobotMode;
+}
+
 export interface ReportEvent {
   id: string;
   timestamp: number;
-  kind: 'detection' | 'manual-reading' | 'command' | 'test';
+  kind: 'detection' | 'manual-reading' | 'command' | 'test' | 'session' | 'telemetry';
   label: string;
   source: 'robot' | 'manual' | 'test';
   gps: GPSData;
@@ -103,6 +132,19 @@ export interface ReportEvent {
   encoders: EncoderData;
   confidence?: number;
   details?: string;
+  sessionId?: string;
+  arduino?: Record<string, unknown> | null;
+  mode?: RobotMode;
+  motorMotion?: string;
+  plotMode?: string;
+  plotActive?: boolean;
+  dashLengthM?: number;
+  gapLengthM?: number;
+  plottedDashedM?: number;
+  plottedUndashedM?: number;
+  trackingErrorM?: number;
+  pathPosition?: number;
+  totalMovedDistance?: number;
 }
 
 export interface RobotContextType {
@@ -113,6 +155,7 @@ export interface RobotContextType {
   disconnect: () => void;
   hostname: string; uptime: number; battery: number; latency: number;
   bridgeStats: BridgeStats | null;
+  arduinoTelemetry: Record<string, unknown> | null;
   cameraFrame: string;
   cameraLive: boolean;
   testingMode: boolean;
@@ -130,11 +173,14 @@ export interface RobotContextType {
   gpsFix: boolean; totalDistance: number; segmentDistance: number;
   potholeCount: number; crackCount: number;
   detections: Detection[];
-  addDetection: (type: 'pothole' | 'crack', confidence: number, source?: Detection['source']) => void;
+  addDetection: (type: 'pothole' | 'crack', confidence: number, source?: Detection['source'], pixelBox?: { x: number; y: number; width: number; height: number; frameWidth?: number; frameHeight?: number }) => void;
   waypoints: Waypoint[];
   addWaypoint: (lat: number, lng: number) => void;
   updateWaypoint: (id: string, lat: number, lng: number) => void;
   deleteWaypoint: (id: string) => void;
+  clearWaypoints: () => void;
+  moveWaypoint: (id: string, direction: 'up' | 'down') => void;
+  updateWaypointHeading: (id: string, heading: number | null) => void;
   importWaypoints: (wps: Waypoint[]) => void;
   pathExecStatus: PathExecStatus;
   startPath: (route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => void; pausePath: () => void; stopPath: () => void; resetPath: () => void;
@@ -150,15 +196,28 @@ export interface RobotContextType {
   manualSpeed: number; setManualSpeed: (v: number) => void;
   semiSpeed: number; setSemiSpeed: (v: number) => void;
   autonomousMaxSpeed: number; setAutonomousMaxSpeed: (v: number) => void;
+  robotSpeedCap: number; setRobotSpeedCap: (v: number) => void;
+  autoTurnSpeed: number; setAutoTurnSpeed: (v: number) => void;
+  cameraCalibration: CameraCalibration; setCameraCalibration: (v: Partial<CameraCalibration>) => void;
+  compassOffset: number; setCompassOffset: (v: number) => void;
+  alignRobotFrontToHeading: boolean; setAlignRobotFrontToHeading: (v: boolean) => void;
+  imageProcessing: ImageProcessingSettings; setImageProcessing: (v: Partial<ImageProcessingSettings>) => void;
   painting: PaintingState;
   setPainting: (p: Partial<PaintingState>) => void;
   pidLinear: PIDSet; setPidLinear: (v: PIDSet) => void;
   pidAngular: PIDSet; setPidAngular: (v: PIDSet) => void;
   pidHistory: { time: number; setpoint: number; actual: number }[];
+  sendMotorTrim: (left: number, right: number) => void;
+  sendEncoderPid: (pid: PIDSet) => void;
+  stopWaypointQueue: () => void;
   joystickOutput: { linear: number; angular: number };
   setJoystickOutput: (v: { linear: number; angular: number }) => void;
   sendVelocity: (linear: number, angular: number) => void;
   sendCommand: (command: string, payload?: Record<string, unknown>) => void;
+  startSession: () => void;
+  stopSession: () => void;
+  activeSession: ReportSession | null;
+  reportSessions: ReportSession[];
   recordManualReading: (label?: string) => void;
   injectTestReport: () => void;
   reportEvents: ReportEvent[];
@@ -176,6 +235,8 @@ type BridgePayload = {
   frame?: string;
   arduino?: Record<string, unknown> | null;
   raw?: string;
+  timestamp_egypt?: string;
+  timestamp_ms?: number;
   stats?: BridgeStats;
   ack?: { type?: 'ack'; message?: string };
   error?: { type?: 'error'; message?: string };
@@ -186,13 +247,45 @@ const DEFAULT_IMU: IMUData = { roll: 0, pitch: 0, yaw: 0, accelX: 0, accelY: 0, 
 const DEFAULT_ENCODERS: EncoderData = { leftTicks: 0, rightTicks: 0, leftRPM: 0, rightRPM: 0, linearVelocity: 0, odometryError: 0, errorHistory: [], timestamp: 0 };
 const MODEL_STORAGE_KEY = 'roboscan-selected-model-path';
 const TOMTOM_STORAGE_KEY = 'roboscan-tomtom-api-key';
+const PREF_STORAGE_KEY = 'roboscan-robot-preferences';
+const REPORT_EVENTS_STORAGE_KEY = 'roboscan-report-events';
+const REPORT_SESSIONS_STORAGE_KEY = 'roboscan-report-sessions';
 const BRIDGE_PORT = 8765;
 const MIN_COMMAND_PWM = 1;
 const MAX_COMMAND_PWM = 255;
+const DEFAULT_ROBOT_SPEED_CAP = 0.4;
+const POTHOME_DUPLICATE_DISTANCE_M = 2;
+const DEFAULT_CAMERA_CALIBRATION: CameraCalibration = {
+  heightCm: 35,
+  tiltDeg: 35,
+  horizontalFovDeg: 62,
+  verticalFovDeg: 38,
+  streamWidth: 320,
+  streamHeight: 180,
+  forwardOffsetCm: 0,
+};
+const DEFAULT_IMAGE_PROCESSING: ImageProcessingSettings = {
+  enabled: false,
+  brightness: 0,
+  contrast: 1,
+  gamma: 1,
+  autoNormalize: false,
+  showProcessed: true,
+};
+
+type StoredPreferences = {
+  robotSpeedCap?: number;
+  autoTurnSpeed?: number;
+  cameraCalibration?: Partial<CameraCalibration>;
+  compassOffset?: number;
+  alignRobotFrontToHeading?: boolean;
+  imageProcessing?: Partial<ImageProcessingSettings>;
+};
 
 const RobotContext = createContext<RobotContextType>({} as RobotContextType);
 
 export function RobotProvider({ children }: { children: React.ReactNode }) {
+  const storedPreferences = useMemo(readStoredPreferences, []);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [connectionIp, setConnectionIp] = useState('192.168.1.100');
   const [hostname, setHostname] = useState('raspberrypi');
@@ -200,6 +293,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [battery, setBattery] = useState(0);
   const [latency, setLatency] = useState(0);
   const [bridgeStats, setBridgeStats] = useState<BridgeStats | null>(null);
+  const [arduinoTelemetry, setArduinoTelemetry] = useState<Record<string, unknown> | null>(null);
   const [cameraFrame, setCameraFrame] = useState('');
   const [cameraLive, setCameraLive] = useState(false);
   const [testingMode, setTestingMode] = useState(false);
@@ -221,10 +315,16 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [pathExecStatus, setPathExecStatus] = useState<PathExecStatus>('idle');
   const [currentTargetIdx, setCurrentTargetIdx] = useState(0);
   const [scriptedStepIdx, setScriptedStepIdx] = useState(0);
-  const [manualSpeed, setManualSpeed] = useState(0.5);
-  const [semiSpeed, setSemiSpeed] = useState(0.5);
-  const [autonomousMaxSpeed, setAutonomousMaxSpeed] = useState(0.5);
-  const [scriptedMoveState, setScriptedMoveState] = useState<ScriptedMove>({ direction: 'forward', distance: 1, movementType: 'straight', speed: 0.5 });
+  const [robotSpeedCap, setRobotSpeedCapState] = useState(storedPreferences.robotSpeedCap ?? DEFAULT_ROBOT_SPEED_CAP);
+  const [autoTurnSpeed, setAutoTurnSpeedState] = useState(storedPreferences.autoTurnSpeed ?? DEFAULT_ROBOT_SPEED_CAP);
+  const [cameraCalibration, setCameraCalibrationState] = useState<CameraCalibration>({ ...DEFAULT_CAMERA_CALIBRATION, ...(storedPreferences.cameraCalibration ?? {}) });
+  const [compassOffset, setCompassOffsetState] = useState(normalizeSignedDegrees(storedPreferences.compassOffset ?? 0));
+  const [alignRobotFrontToHeading, setAlignRobotFrontToHeadingState] = useState(storedPreferences.alignRobotFrontToHeading ?? true);
+  const [imageProcessing, setImageProcessingState] = useState<ImageProcessingSettings>({ ...DEFAULT_IMAGE_PROCESSING, ...(storedPreferences.imageProcessing ?? {}) });
+  const [manualSpeed, setManualSpeedState] = useState(DEFAULT_ROBOT_SPEED_CAP);
+  const [semiSpeed, setSemiSpeedState] = useState(DEFAULT_ROBOT_SPEED_CAP);
+  const [autonomousMaxSpeed, setAutonomousMaxSpeedState] = useState(DEFAULT_ROBOT_SPEED_CAP);
+  const [scriptedMoveState, setScriptedMoveState] = useState<ScriptedMove>({ direction: 'forward', distance: 1, movementType: 'straight', speed: DEFAULT_ROBOT_SPEED_CAP });
   const [scriptedMoves, setScriptedMoves] = useState<ScriptedMoveStep[]>([]);
   const [painting, setPaintingState] = useState<PaintingState>({
     active: false, mode: 'solid', dashLength: 0.5, gapLength: 0.3,
@@ -233,7 +333,9 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [pidLinear, setPidLinear] = useState<PIDSet>({ kp: 0, ki: 0, kd: 0 });
   const [pidAngular, setPidAngular] = useState<PIDSet>({ kp: 0, ki: 0, kd: 0 });
   const [joystickOutput, setJoystickOutputState] = useState({ linear: 0, angular: 0 });
-  const [reportEvents, setReportEvents] = useState<ReportEvent[]>([]);
+  const [reportEvents, setReportEvents] = useState<ReportEvent[]>(() => readJsonArray<ReportEvent>(REPORT_EVENTS_STORAGE_KEY));
+  const [reportSessions, setReportSessions] = useState<ReportSession[]>(() => readJsonArray<ReportSession>(REPORT_SESSIONS_STORAGE_KEY));
+  const [activeSession, setActiveSession] = useState<ReportSession | null>(null);
   const [units, setUnits] = useState<'metric' | 'imperial'>('metric');
   const [gpsThreshold, setGpsThreshold] = useState(5);
   const [encoderErrorLimit, setEncoderErrorLimit] = useState(0.15);
@@ -245,10 +347,43 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const connectedAtRef = useRef<number | null>(null);
   const lastMessageAtRef = useRef<number | null>(null);
   const latestRef = useRef({ gps: DEFAULT_GPS, imu: DEFAULT_IMU, encoders: DEFAULT_ENCODERS });
+  const lastManualMotionRef = useRef('');
+  const scriptedTimerRef = useRef<number | null>(null);
+  const activeSessionRef = useRef<ReportSession | null>(null);
+  const latestTelemetryRef = useRef<Record<string, unknown> | null>(null);
+  const lastTelemetryReportAtRef = useRef(0);
+  const lastAckMessageRef = useRef('');
 
   useEffect(() => {
     latestRef.current = { gps, imu, encoders };
   }, [gps, imu, encoders]);
+
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
+
+  useEffect(() => {
+    latestTelemetryRef.current = arduinoTelemetry;
+  }, [arduinoTelemetry]);
+
+  useEffect(() => {
+    localStorage.setItem(REPORT_EVENTS_STORAGE_KEY, JSON.stringify(reportEvents.slice(0, 10000)));
+  }, [reportEvents]);
+
+  useEffect(() => {
+    localStorage.setItem(REPORT_SESSIONS_STORAGE_KEY, JSON.stringify(reportSessions.slice(0, 100)));
+  }, [reportSessions]);
+
+  useEffect(() => {
+    localStorage.setItem(PREF_STORAGE_KEY, JSON.stringify({
+      robotSpeedCap,
+      autoTurnSpeed,
+      cameraCalibration,
+      compassOffset,
+      alignRobotFrontToHeading,
+      imageProcessing,
+    } satisfies StoredPreferences));
+  }, [alignRobotFrontToHeading, autoTurnSpeed, cameraCalibration, compassOffset, imageProcessing, robotSpeedCap]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -262,20 +397,71 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const appendReportEvent = useCallback((event: Omit<ReportEvent, 'id' | 'timestamp' | 'gps' | 'imu' | 'encoders'> & { timestamp?: number }) => {
     const timestamp = event.timestamp ?? Date.now();
     const snapshot = latestRef.current;
+    const telemetry = latestTelemetryRef.current;
     setReportEvents((prev) => [{
       id: `${event.source}-${timestamp}-${prev.length}`,
       timestamp,
       gps: snapshot.gps,
       imu: snapshot.imu,
       encoders: snapshot.encoders,
+      sessionId: activeSessionRef.current?.id,
+      arduino: telemetry,
+      mode,
+      motorMotion: stringFrom(telemetry ?? {}, ['motor_motion', 'motion', 'drive_motion'], inferMotorMotion(telemetry, snapshot.encoders)),
+      plotMode: stringFrom(telemetry ?? {}, ['plot_mode'], 'OFF'),
+      plotActive: boolFrom(telemetry ?? {}, ['spraying', 'plot_active'], false),
+      dashLengthM: numberFrom(telemetry ?? {}, ['dash_m'], painting.dashLength),
+      gapLengthM: numberFrom(telemetry ?? {}, ['gap_m'], painting.gapLength),
+      plottedDashedM: numberFrom(telemetry ?? {}, ['plotted_dashed_m'], 0),
+      plottedUndashedM: numberFrom(telemetry ?? {}, ['plotted_undashed_m', 'plot_distance_m'], 0),
+      trackingErrorM: numberFrom(telemetry ?? {}, ['odometryError', 'odometry_error', 'odom_error', 'encoder_error'], snapshot.encoders.odometryError),
+      pathPosition: numberFrom(telemetry ?? {}, ['wp_index', 'path_position'], currentTargetIdx),
+      totalMovedDistance: totalDistance,
       ...event,
-    }, ...prev].slice(0, 500));
-  }, []);
+    }, ...prev].slice(0, 10000));
+  }, [currentTargetIdx, mode, painting.dashLength, painting.gapLength, totalDistance]);
 
   const sendCommand = useCallback((command: string, payload?: Record<string, unknown>) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify(payload ? { type: command, ...payload } : { type: command }));
+  }, []);
+
+  const capSpeed = useCallback((speed: number) => clampSpeed(speed, robotSpeedCap), [robotSpeedCap]);
+
+  const setRobotSpeedCap = useCallback((value: number) => {
+    const next = clampSpeed(value, 2);
+    setRobotSpeedCapState(next);
+    setManualSpeedState((prev) => clampSpeed(prev, next));
+    setSemiSpeedState((prev) => clampSpeed(prev, next));
+    setAutonomousMaxSpeedState((prev) => clampSpeed(prev, next));
+    setAutoTurnSpeedState((prev) => clampSpeed(prev, next));
+    setScriptedMoveState((prev) => ({ ...prev, speed: clampSpeed(prev.speed, next) }));
+    sendCommand('speed_cap', { speed: normalizedSpeedToPwm(next) });
+  }, [sendCommand]);
+
+  const setAutoTurnSpeed = useCallback((value: number) => {
+    const next = capSpeed(value);
+    setAutoTurnSpeedState(next);
+    sendCommand('auto_turn_speed', { speed: normalizedSpeedToPwm(next) });
+  }, [capSpeed, sendCommand]);
+
+  const setManualSpeed = useCallback((value: number) => setManualSpeedState(capSpeed(value)), [capSpeed]);
+  const setSemiSpeed = useCallback((value: number) => setSemiSpeedState(capSpeed(value)), [capSpeed]);
+  const setAutonomousMaxSpeed = useCallback((value: number) => setAutonomousMaxSpeedState(capSpeed(value)), [capSpeed]);
+
+  const setCameraCalibration = useCallback((value: Partial<CameraCalibration>) => {
+    setCameraCalibrationState((prev) => sanitizeCameraCalibration({ ...prev, ...value }));
+  }, []);
+
+  const setCompassOffset = useCallback((value: number) => {
+    const next = normalizeSignedDegrees(value);
+    setCompassOffsetState(next);
+    sendCommand('compass_offset', { degrees: next });
+  }, [sendCommand]);
+
+  const setImageProcessing = useCallback((value: Partial<ImageProcessingSettings>) => {
+    setImageProcessingState((prev) => sanitizeImageProcessing({ ...prev, ...value }));
   }, []);
 
   useEffect(() => {
@@ -351,23 +537,32 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, [appendReportEvent, testingMode]);
 
   const sendVelocity = useCallback((linear: number, angular: number) => {
-    setJoystickOutputState({ linear, angular });
-    const speed = velocityToPwm(linear, angular);
+    const cappedLinear = Math.sign(linear) * capSpeed(Math.abs(linear));
+    const cappedAngular = Math.sign(angular) * capSpeed(Math.abs(angular));
+    setJoystickOutputState({ linear: cappedLinear, angular: cappedAngular });
+    const speed = velocityToPwm(cappedLinear, cappedAngular, robotSpeedCap);
+    const nextMotion = speed === 0 ? 'stop' : Math.abs(cappedLinear) >= Math.abs(cappedAngular) ? (cappedLinear > 0 ? 'forward' : 'backward') : (cappedAngular > 0 ? 'left' : 'right');
 
     if (speed === 0) {
       sendCommand('stop');
+      lastManualMotionRef.current = 'stop';
       return;
     }
 
-    if (Math.abs(linear) >= Math.abs(angular)) {
+    if (lastManualMotionRef.current && lastManualMotionRef.current !== nextMotion && lastManualMotionRef.current !== 'stop') {
+      sendCommand('stop');
+    }
+    lastManualMotionRef.current = nextMotion;
+
+    if (Math.abs(cappedLinear) >= Math.abs(cappedAngular)) {
       sendCommand('speed', { speed });
-      sendCommand('movement', { action: linear > 0 ? 'forward' : 'backward' });
+      sendCommand('movement', { action: cappedLinear > 0 ? 'forward' : 'backward' });
       return;
     }
 
     sendCommand('turn_speed', { speed });
-    sendCommand('movement', { action: angular > 0 ? 'left' : 'right' });
-  }, [sendCommand]);
+    sendCommand('movement', { action: cappedAngular > 0 ? 'left' : 'right' });
+  }, [capSpeed, robotSpeedCap, sendCommand]);
 
   const disconnect = useCallback(() => {
     if (socketRef.current) {
@@ -380,6 +575,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setCameraLive(false);
     setCameraFrame('');
     setBridgeStats(null);
+    setArduinoTelemetry(null);
     setImuLive(false);
     setGpsLive(false);
     setEncodersLive(false);
@@ -389,15 +585,22 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const handleArduinoPayload = useCallback((arduino: Record<string, unknown>) => {
     const now = Date.now();
+    latestTelemetryRef.current = arduino;
+    setArduinoTelemetry(arduino);
     const hasGpsFields = hasAny(arduino, [
       'lat', 'latitude', 'gps_lat', 'la',
       'lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo',
       'fix', 'gps_fix', 'gpsFix', 'g',
-      'gps_speed', 'gpsSpeed', 'gps_heading', 'gpsHeading', 'gps_hdop', 'hdop',
+      'gps_speed', 'gpsSpeed', 'gps_course', 'gpsCourse', 'gps_heading', 'gpsHeading', 'gps_hdop', 'hdop',
     ]);
     const hasGpsFix = hasAny(arduino, ['fix', 'gps_fix', 'gpsFix', 'g']);
-    const heading = numberFrom(arduino, ['heading', 'yaw', 'compass', 'h'], 0);
-    const gpsHeading = numberFrom(arduino, ['gps_heading', 'gpsHeading', 'course'], heading);
+    const correctedCompassHeading = numberFrom(arduino, ['compass_heading', 'compassHeading', 'heading', 'compass', 'h'], Number.NaN);
+    const rawCompassHeading = numberFrom(arduino, ['compass_raw_heading', 'compassRawHeading', 'heading_raw'], Number.NaN);
+    const heading = Number.isFinite(correctedCompassHeading)
+      ? normalizeDegrees(correctedCompassHeading)
+      : Number.isFinite(rawCompassHeading)
+        ? normalizeDegrees(rawCompassHeading + compassOffset)
+        : latestRef.current.gps.heading;
     const gpsSpeed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], 0);
     setGps((prev) => {
       const gpsFix = hasGpsFix ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], prev.fix) : prev.fix;
@@ -405,14 +608,14 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       const lng = gpsFix ? numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], prev.lng) : prev.lng;
       const speed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], prev.speed);
       const accuracy = numberFrom(arduino, ['accuracy', 'gps_accuracy', 'gps_hdop', 'hdop', 'hd'], prev.accuracy);
-      return { lat, lng, speed, heading: gpsHeading, fix: gpsFix, accuracy, timestamp: hasGpsFields ? now : prev.timestamp };
+      return { lat, lng, speed, heading, fix: gpsFix, accuracy, timestamp: hasGpsFields ? now : prev.timestamp };
     });
     setGpsLive((prev) => hasGpsFields ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], prev) || hasAny(arduino, ['lat', 'latitude', 'lng', 'lon', 'longitude', 'la', 'lo']) : prev);
 
-    setImu({
-      roll: numberFrom(arduino, ['roll'], 0),
-      pitch: numberFrom(arduino, ['pitch'], 0),
-      yaw: numberFrom(arduino, ['yaw', 'heading', 'compass', 'h'], heading),
+    setImu((prev) => ({
+      roll: numberFrom(arduino, ['roll'], prev.roll),
+      pitch: numberFrom(arduino, ['pitch'], prev.pitch),
+      yaw: numberFrom(arduino, ['yaw'], prev.yaw),
       accelX: numberFrom(arduino, ['accelX', 'accel_x', 'ax'], 0),
       accelY: numberFrom(arduino, ['accelY', 'accel_y', 'ay'], 0),
       accelZ: numberFrom(arduino, ['accelZ', 'accel_z', 'az'], 0),
@@ -420,8 +623,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       gyroY: numberFrom(arduino, ['gyroY', 'gyro_y', 'gy'], 0),
       gyroZ: numberFrom(arduino, ['gyroZ', 'gyro_z', 'gz'], 0),
       timestamp: now,
-    });
-    setImuLive(hasAny(arduino, ['roll', 'pitch', 'yaw', 'heading', 'compass', 'h']));
+    }));
+    setImuLive(hasAny(arduino, ['roll', 'pitch', 'yaw', 'accelX', 'accel_x', 'gyroX', 'gyro_x']));
 
     const leftTicks = numberFrom(arduino, ['leftTicks', 'left_ticks', 'encoder_left', 'left', 'e1'], 0);
     const rightTicks = numberFrom(arduino, ['rightTicks', 'right_ticks', 'encoder_right', 'right', 'e2'], 0);
@@ -444,7 +647,24 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setHostname(stringFrom(arduino, ['hostname', 'host'], hostname));
     setTotalDistance(numberFrom(arduino, ['totalDistance', 'total_distance'], numberFrom(arduino, ['left_m', 'right_m'], totalDistance)));
     setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance', 'plot_distance_m', 'pd', 'plot_target_m', 'pt'], segmentDistance));
-  }, [battery, hostname, segmentDistance, totalDistance]);
+    if (hasAny(arduino, ['wp_index'])) setCurrentTargetIdx(numberFrom(arduino, ['wp_index'], currentTargetIdx));
+    const waypointCount = numberFrom(arduino, ['wp_count'], 0);
+    if (boolFrom(arduino, ['nav_active', 'wp_active'], false)) {
+      setPathExecStatus('running');
+    } else if (waypointCount > 0 && pathExecStatus === 'running') {
+      setPathExecStatus('idle');
+    }
+    if (activeSessionRef.current && now - lastTelemetryReportAtRef.current >= 1000) {
+      lastTelemetryReportAtRef.current = now;
+      appendReportEvent({
+        kind: 'telemetry',
+        source: 'robot',
+        label: 'Telemetry snapshot',
+        details: `WP ${numberFrom(arduino, ['wp_index'], currentTargetIdx) + 1}/${waypointCount || '-'}; target ${numberFrom(arduino, ['target_distance_m'], 0).toFixed(2)}m; heading error ${numberFrom(arduino, ['heading_error'], 0).toFixed(2)} deg`,
+        timestamp: now,
+      });
+    }
+  }, [appendReportEvent, battery, compassOffset, currentTargetIdx, hostname, pathExecStatus, segmentDistance, totalDistance]);
 
   const connect = useCallback(() => {
     const host = connectionIp.trim();
@@ -459,6 +679,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       lastMessageAtRef.current = Date.now();
       setConnectionStatus('connected');
       setHostname(host);
+      socket.send(JSON.stringify({ type: 'compass_offset', degrees: compassOffset }));
     };
     socket.onmessage = (event) => {
       lastMessageAtRef.current = Date.now();
@@ -482,6 +703,18 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
           latest_error: payload.error?.message ?? prev?.latest_error,
         }));
       }
+      if (payload.ack?.message && payload.ack.message !== lastAckMessageRef.current) {
+        lastAckMessageRef.current = payload.ack.message;
+        if (/^(WP_|NAV_|GOTO)/.test(payload.ack.message)) {
+          appendReportEvent({
+            kind: 'command',
+            source: 'robot',
+            label: payload.ack.message.split('|')[0].replace(/_/g, ' '),
+            details: payload.ack.message,
+            timestamp: typeof payload.timestamp_ms === 'number' ? payload.timestamp_ms : Date.now(),
+          });
+        }
+      }
       const arduinoPayload = payload.arduino ?? parseCompactArduinoStatus(payload.raw);
       if (arduinoPayload) handleArduinoPayload(arduinoPayload);
       if (payload.frame) {
@@ -500,7 +733,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         setCameraLive(false);
       }
     };
-  }, [connectionIp, connectionStatus, disconnect, handleArduinoPayload]);
+  }, [appendReportEvent, compassOffset, connectionIp, connectionStatus, disconnect, handleArduinoPayload]);
 
   const setMode = useCallback((nextMode: RobotMode) => {
     setModeState(nextMode);
@@ -522,43 +755,88 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setWaypoints((prev) => prev.filter((wp) => wp.id !== id).map((wp, order) => ({ ...wp, order })));
   }, []);
 
+  const clearWaypoints = useCallback(() => {
+    setWaypoints([]);
+  }, []);
+
+  const moveWaypoint = useCallback((id: string, direction: 'up' | 'down') => {
+    setWaypoints((prev) => {
+      const sorted = [...prev].sort((a, b) => a.order - b.order);
+      const index = sorted.findIndex((wp) => wp.id === id);
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (index < 0 || targetIndex < 0 || targetIndex >= sorted.length) return prev;
+      [sorted[index], sorted[targetIndex]] = [sorted[targetIndex], sorted[index]];
+      return sorted.map((wp, order) => ({ ...wp, order }));
+    });
+  }, []);
+
+  const updateWaypointHeading = useCallback((id: string, heading: number | null) => {
+    setWaypoints((prev) => prev.map((wp) => (
+      wp.id === id ? { ...wp, headingOverride: heading === null ? null : ((heading % 360) + 360) % 360 } : wp
+    )));
+  }, []);
+
   const importWaypoints = useCallback((wps: Waypoint[]) => {
-    setWaypoints(wps.map((wp, order) => ({ ...wp, order, id: wp.id || `wp-${Date.now()}-${order}` })));
+    setWaypoints(wps.map((wp, order) => ({
+      ...wp,
+      headingOverride: typeof wp.headingOverride === 'number' ? ((wp.headingOverride % 360) + 360) % 360 : null,
+      order,
+      id: wp.id || `wp-${Date.now()}-${order}`,
+    })));
   }, []);
 
   const startPath = useCallback((route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => {
-    setPathExecStatus('running');
-    setCurrentTargetIdx(0);
     const routePoints = route?.points ?? waypoints.map(({ lat, lng }) => ({ lat, lng }));
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${route?.maxSpeed ?? autonomousMaxSpeed}m/s` });
-  }, [appendReportEvent, autonomousMaxSpeed, waypoints]);
+    if (routePoints.length === 0) return;
+    if (!gps.fix) {
+      setPathExecStatus('idle');
+      appendReportEvent({ kind: 'command', source: 'robot', label: 'Waypoint start blocked', details: 'GPS fix is required before waypoint following can start' });
+      setBridgeStats((prev) => ({
+        ...(prev ?? {}),
+        autonomous_note: 'GPS fix required before waypoint following can start',
+      }));
+      return;
+    }
+    const cappedMaxSpeed = capSpeed(route?.maxSpeed ?? autonomousMaxSpeed);
+    setCurrentTargetIdx(0);
+    sendCommand('speed', { speed: normalizedSpeedToPwm(cappedMaxSpeed) });
+    sendCommand('auto_turn_speed', { speed: normalizedSpeedToPwm(autoTurnSpeed) });
+    sendCommand('speed_cap', { speed: normalizedSpeedToPwm(robotSpeedCap) });
+    sendCommand('wp_clear');
+    routePoints.forEach((point, order) => {
+      sendCommand('wp_add', { order, lat: point.lat, lng: point.lng });
+    });
+    sendCommand('wp_start');
+    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${cappedMaxSpeed}m/s` });
+  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, robotSpeedCap, sendCommand, waypoints]);
 
   const pausePath = useCallback(() => {
     setPathExecStatus('paused');
-    sendCommand('stop');
+    sendCommand('wp_stop');
   }, [sendCommand]);
 
   const stopPath = useCallback(() => {
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
-    sendCommand('stop');
+    sendCommand('wp_stop');
   }, [sendCommand]);
 
   const resetPath = useCallback(() => {
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
-  }, []);
+    sendCommand('wp_stop');
+  }, [sendCommand]);
 
   const setScriptedMove = useCallback((move: Partial<ScriptedMove>) => {
-    setScriptedMoveState((prev) => ({ ...prev, ...move }));
-  }, []);
+    setScriptedMoveState((prev) => ({ ...prev, ...move, speed: move.speed === undefined ? prev.speed : capSpeed(move.speed) }));
+  }, [capSpeed]);
 
   const addScriptedMove = useCallback(() => {
     setScriptedMoves((prev) => [
       ...prev,
-      { ...scriptedMoveState, speed: scriptedMoveState.speed || semiSpeed, id: `step-${Date.now()}-${prev.length}` },
+      { ...scriptedMoveState, speed: capSpeed(scriptedMoveState.speed || semiSpeed), id: `step-${Date.now()}-${prev.length}` },
     ]);
-  }, [scriptedMoveState, semiSpeed]);
+  }, [capSpeed, scriptedMoveState, semiSpeed]);
 
   const removeScriptedMove = useCallback((id: string) => {
     setScriptedMoves((prev) => prev.filter((step) => step.id !== id));
@@ -577,25 +855,21 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const startScriptedMove = useCallback(() => {
     const steps = scriptedMoves.length ? scriptedMoves : [{ ...scriptedMoveState, id: `step-${Date.now()}-single` }];
+    if (scriptedTimerRef.current) window.clearTimeout(scriptedTimerRef.current);
     setPathExecStatus('running');
     setScriptedStepIdx(0);
-    const firstStep = steps[0];
-    const speed = normalizedSpeedToPwm(firstStep.speed);
-    if (firstStep.direction === 'left' || firstStep.direction === 'right') {
-      sendCommand('turn_speed', { speed });
-    } else {
-      sendCommand('speed', { speed });
-    }
-    sendCommand('movement', { action: firstStep.direction });
+    runScriptedStep(steps.map((step) => ({ ...step, speed: capSpeed(step.speed) })), 0, sendCommand, setScriptedStepIdx, setPathExecStatus, scriptedTimerRef);
     appendReportEvent({ kind: 'command', source: 'robot', label: 'Started scripted path', details: `${steps.length} movement step${steps.length === 1 ? '' : 's'}` });
-  }, [appendReportEvent, scriptedMoveState, scriptedMoves, sendCommand]);
+  }, [appendReportEvent, capSpeed, scriptedMoveState, scriptedMoves, sendCommand]);
 
   const pauseScriptedMove = useCallback(() => {
+    if (scriptedTimerRef.current) window.clearTimeout(scriptedTimerRef.current);
     setPathExecStatus('paused');
     sendCommand('stop');
   }, [sendCommand]);
 
   const resetScriptedMove = useCallback(() => {
+    if (scriptedTimerRef.current) window.clearTimeout(scriptedTimerRef.current);
     setPathExecStatus('idle');
     setScriptedStepIdx(0);
     sendCommand('stop');
@@ -620,23 +894,66 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     });
   }, [sendCommand]);
 
-  const addDetection = useCallback((type: 'pothole' | 'crack', confidence: number, source: Detection['source'] = 'model') => {
+  const addDetection = useCallback((type: 'pothole' | 'crack', confidence: number, source: Detection['source'] = 'model', pixelBox?: { x: number; y: number; width: number; height: number; frameWidth?: number; frameHeight?: number }) => {
     const snapshot = latestRef.current;
+    const estimatedGps = type === 'pothole'
+      ? estimateDetectionGps(snapshot.gps, cameraCalibration, pixelBox)
+      : null;
     const detection: Detection = {
       id: `det-${Date.now()}`,
       type,
-      lat: snapshot.gps.lat,
-      lng: snapshot.gps.lng,
+      lat: estimatedGps?.lat ?? snapshot.gps.lat,
+      lng: estimatedGps?.lng ?? snapshot.gps.lng,
       confidence,
       timestamp: Date.now(),
       source,
+      count: 1,
+      lastSeenAt: Date.now(),
+      mapped: Boolean(estimatedGps),
     };
-    setDetections((prev) => [detection, ...prev].slice(0, 500));
-    appendReportEvent({ kind: 'detection', source: source === 'test' ? 'test' : 'robot', label: type, confidence, details: `Detected ${type}` });
-  }, [appendReportEvent]);
+    setDetections((prev) => {
+      if (type === 'pothole' && estimatedGps) {
+        const duplicateIndex = prev.findIndex((item) => item.type === 'pothole' && distanceMeters(item.lat, item.lng, detection.lat, detection.lng) < POTHOME_DUPLICATE_DISTANCE_M);
+        if (duplicateIndex >= 0) {
+          return prev.map((item, index) => index === duplicateIndex ? {
+            ...item,
+            confidence: Math.max(item.confidence, confidence),
+            count: (item.count ?? 1) + 1,
+            lastSeenAt: detection.timestamp,
+            timestamp: detection.timestamp,
+          } : item);
+        }
+      }
+      return [detection, ...prev].slice(0, 500);
+    });
+    appendReportEvent({
+      kind: 'detection',
+      source: source === 'test' ? 'test' : 'robot',
+      label: type,
+      confidence,
+      details: estimatedGps ? `Detected ${type} mapped from camera pixels` : `Detected ${type}${type === 'pothole' ? ' without valid GPS pixel map' : ''}`,
+    });
+  }, [appendReportEvent, cameraCalibration]);
 
   const recordManualReading = useCallback((label = 'Manual reading') => {
     appendReportEvent({ kind: 'manual-reading', source: 'manual', label, details: 'Manual sensor snapshot recorded' });
+  }, [appendReportEvent]);
+
+  const startSession = useCallback(() => {
+    if (activeSessionRef.current) return;
+    const session: ReportSession = { id: `session-${Date.now()}`, startedAt: Date.now(), mode };
+    setActiveSession(session);
+    setReportSessions((prev) => [session, ...prev].slice(0, 100));
+    appendReportEvent({ kind: 'session', source: 'robot', label: 'Session started', details: `Started ${mode} session`, sessionId: session.id });
+  }, [appendReportEvent, mode]);
+
+  const stopSession = useCallback(() => {
+    const session = activeSessionRef.current;
+    if (!session) return;
+    const endedAt = Date.now();
+    setActiveSession(null);
+    setReportSessions((prev) => prev.map((item) => item.id === session.id ? { ...item, endedAt } : item));
+    appendReportEvent({ kind: 'session', source: 'robot', label: 'Session stopped', details: `Stopped session after ${Math.round((endedAt - session.startedAt) / 1000)}s`, sessionId: session.id });
   }, [appendReportEvent]);
 
   const injectTestReport = useCallback(() => {
@@ -664,12 +981,29 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem(TOMTOM_STORAGE_KEY, value);
   }, []);
 
+  const sendMotorTrim = useCallback((left: number, right: number) => {
+    sendCommand('motor_trim', { left, right });
+    appendReportEvent({ kind: 'command', source: 'robot', label: 'Motor trim applied', details: `left=${left}, right=${right}` });
+  }, [appendReportEvent, sendCommand]);
+
+  const sendEncoderPid = useCallback((pid: PIDSet) => {
+    setPidLinear(pid);
+    sendCommand('encoder_pid', pid);
+    appendReportEvent({ kind: 'command', source: 'robot', label: 'Encoder PID applied', details: `kp=${pid.kp}, ki=${pid.ki}, kd=${pid.kd}` });
+  }, [appendReportEvent, sendCommand]);
+
+  const stopWaypointQueue = useCallback(() => {
+    setPathExecStatus('idle');
+    setCurrentTargetIdx(0);
+    sendCommand('wp_stop');
+  }, [sendCommand]);
+
   const pidHistory = useMemo(() => encoders.errorHistory.map((actual, time) => ({ time, setpoint: 0, actual })), [encoders.errorHistory]);
 
   return (
     <RobotContext.Provider value={{
       connectionStatus, connectionIp, setConnectionIp, connect, disconnect,
-      hostname, uptime, battery, latency, bridgeStats, cameraFrame, cameraLive, testingMode, setTestingMode, modelStatus,
+      hostname, uptime, battery, latency, bridgeStats, arduinoTelemetry, cameraFrame, cameraLive, testingMode, setTestingMode, modelStatus,
       selectedModelPath: selectedModelPathState, setSelectedModelPath, setModelStatus,
       tomTomApiKey: tomTomApiKeyState, setTomTomApiKey,
       imu, gps, encoders, imuLive, gpsLive, encodersLive,
@@ -677,15 +1011,21 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       potholeCount: detections.filter((d) => d.type === 'pothole').length,
       crackCount: detections.filter((d) => d.type === 'crack').length,
       detections, addDetection,
-      waypoints, addWaypoint, updateWaypoint, deleteWaypoint, importWaypoints,
+      waypoints, addWaypoint, updateWaypoint, deleteWaypoint, clearWaypoints, moveWaypoint, updateWaypointHeading, importWaypoints,
       pathExecStatus, startPath, pausePath, stopPath, resetPath, currentTargetIdx, scriptedStepIdx,
       scriptedMove: scriptedMoveState, setScriptedMove,
       scriptedMoves, addScriptedMove, removeScriptedMove, moveScriptedMove,
       startScriptedMove, pauseScriptedMove, resetScriptedMove,
       manualSpeed, setManualSpeed, semiSpeed, setSemiSpeed, autonomousMaxSpeed, setAutonomousMaxSpeed,
+      robotSpeedCap, setRobotSpeedCap, autoTurnSpeed, setAutoTurnSpeed,
+      cameraCalibration, setCameraCalibration, compassOffset, setCompassOffset,
+      alignRobotFrontToHeading, setAlignRobotFrontToHeading: setAlignRobotFrontToHeadingState,
+      imageProcessing, setImageProcessing,
       painting, setPainting,
       pidLinear, setPidLinear, pidAngular, setPidAngular, pidHistory,
+      sendMotorTrim, sendEncoderPid, stopWaypointQueue,
       joystickOutput, setJoystickOutput: sendVelocity, sendVelocity, sendCommand,
+      startSession, stopSession, activeSession, reportSessions,
       recordManualReading, injectTestReport, reportEvents,
       emergencyStop,
       units, setUnits, gpsThreshold, setGpsThreshold,
@@ -729,8 +1069,8 @@ function normalizedSpeedToPwm(speed: number): number {
   return Math.max(MIN_COMMAND_PWM, Math.min(MAX_COMMAND_PWM, Math.round(speed * MAX_COMMAND_PWM)));
 }
 
-function velocityToPwm(linear: number, angular: number): number {
-  return normalizedSpeedToPwm(Math.max(Math.abs(linear), Math.abs(angular)));
+function velocityToPwm(linear: number, angular: number, cap: number): number {
+  return normalizedSpeedToPwm(clampSpeed(Math.max(Math.abs(linear), Math.abs(angular)), cap));
 }
 
 function numberFrom(data: Record<string, unknown>, keys: string[], fallback: number): number {
@@ -762,6 +1102,133 @@ function boolFrom(data: Record<string, unknown>, keys: string[], fallback: boole
 
 function hasAny(data: Record<string, unknown>, keys: string[]): boolean {
   return keys.some((key) => data[key] !== undefined && data[key] !== null);
+}
+
+function clampSpeed(value: number, cap: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_ROBOT_SPEED_CAP;
+  return Math.max(0, Math.min(Math.max(0.05, cap), value));
+}
+
+function normalizeDegrees(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return ((value % 360) + 360) % 360;
+}
+
+function normalizeSignedDegrees(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return ((((value % 360) + 540) % 360) - 180);
+}
+
+function sanitizeCameraCalibration(value: CameraCalibration): CameraCalibration {
+  return {
+    heightCm: Math.max(1, value.heightCm),
+    tiltDeg: Math.max(0, Math.min(89, value.tiltDeg)),
+    horizontalFovDeg: Math.max(10, Math.min(160, value.horizontalFovDeg)),
+    verticalFovDeg: Math.max(10, Math.min(120, value.verticalFovDeg)),
+    streamWidth: Math.max(1, Math.round(value.streamWidth)),
+    streamHeight: Math.max(1, Math.round(value.streamHeight)),
+    forwardOffsetCm: Math.max(-200, Math.min(200, value.forwardOffsetCm)),
+  };
+}
+
+function sanitizeImageProcessing(value: ImageProcessingSettings): ImageProcessingSettings {
+  return {
+    enabled: Boolean(value.enabled),
+    brightness: Math.max(-100, Math.min(100, value.brightness)),
+    contrast: Math.max(0.2, Math.min(3, value.contrast)),
+    gamma: Math.max(0.2, Math.min(3, value.gamma)),
+    autoNormalize: Boolean(value.autoNormalize),
+    showProcessed: Boolean(value.showProcessed),
+  };
+}
+
+function readStoredPreferences(): StoredPreferences {
+  try {
+    return JSON.parse(localStorage.getItem(PREF_STORAGE_KEY) ?? '{}') as StoredPreferences;
+  } catch {
+    return {};
+  }
+}
+
+function readJsonArray<T>(key: string): T[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function inferMotorMotion(telemetry: Record<string, unknown> | null, encoders: EncoderData): string {
+  if (boolFrom(telemetry ?? {}, ['drive_moving', 'moving'], false)) return 'moving';
+  if (Math.abs(encoders.linearVelocity) > 0.01) return 'moving';
+  return 'stopped';
+}
+
+function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const radius = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function offsetGps(lat: number, lng: number, northM: number, eastM: number) {
+  const radius = 6378137;
+  const nextLat = lat + (northM / radius) * (180 / Math.PI);
+  const nextLng = lng + (eastM / (radius * Math.cos((lat * Math.PI) / 180))) * (180 / Math.PI);
+  return { lat: nextLat, lng: nextLng };
+}
+
+function estimateDetectionGps(gps: GPSData, calibration: CameraCalibration, pixelBox?: { x: number; y: number; width: number; height: number; frameWidth?: number; frameHeight?: number }) {
+  if (!gps.fix || !pixelBox) return null;
+  const frameWidth = pixelBox.frameWidth || calibration.streamWidth;
+  const frameHeight = pixelBox.frameHeight || calibration.streamHeight;
+  const centerX = pixelBox.x + pixelBox.width / 2;
+  const centerY = pixelBox.y + pixelBox.height / 2;
+  const xNorm = (centerX - frameWidth / 2) / frameWidth;
+  const yNorm = (centerY - frameHeight / 2) / frameHeight;
+  const sideAngle = xNorm * calibration.horizontalFovDeg;
+  const groundAngle = Math.max(1, calibration.tiltDeg + yNorm * calibration.verticalFovDeg);
+  const forwardM = Math.max(0, (calibration.heightCm / 100) / Math.tan((groundAngle * Math.PI) / 180)) + calibration.forwardOffsetCm / 100;
+  const lateralM = Math.tan((sideAngle * Math.PI) / 180) * forwardM;
+  const heading = (gps.heading * Math.PI) / 180;
+  const northM = Math.cos(heading) * forwardM - Math.sin(heading) * lateralM;
+  const eastM = Math.sin(heading) * forwardM + Math.cos(heading) * lateralM;
+  return offsetGps(gps.lat, gps.lng, northM, eastM);
+}
+
+function runScriptedStep(
+  steps: ScriptedMoveStep[],
+  index: number,
+  sendCommand: (command: string, payload?: Record<string, unknown>) => void,
+  setScriptedStepIdx: (index: number) => void,
+  setPathExecStatus: (status: PathExecStatus) => void,
+  timerRef: React.MutableRefObject<number | null>,
+) {
+  if (index >= steps.length) {
+    sendCommand('stop');
+    setPathExecStatus('idle');
+    return;
+  }
+  const step = steps[index];
+  const speed = normalizedSpeedToPwm(step.speed);
+  setScriptedStepIdx(index);
+  sendCommand('stop');
+  timerRef.current = window.setTimeout(() => {
+    if (step.direction === 'left' || step.direction === 'right') sendCommand('turn_speed', { speed });
+    else sendCommand('speed', { speed });
+    sendCommand('movement', { action: step.direction, speed });
+    const durationMs = stepDurationMs(step);
+    timerRef.current = window.setTimeout(() => runScriptedStep(steps, index + 1, sendCommand, setScriptedStepIdx, setPathExecStatus, timerRef), durationMs);
+  }, 250);
+}
+
+function stepDurationMs(step: ScriptedMove): number {
+  if (step.direction === 'left' || step.direction === 'right' || step.movementType === 'turn') return 3500;
+  const speed = Math.max(0.05, step.speed);
+  return Math.max(750, Math.min(30000, (step.distance / speed) * 1000));
 }
 
 export const useRobot = () => useContext(RobotContext);

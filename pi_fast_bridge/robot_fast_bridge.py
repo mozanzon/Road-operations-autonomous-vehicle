@@ -15,6 +15,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 try:
     import cv2
@@ -30,6 +31,8 @@ import websockets
 
 
 DEFAULT_PORTS = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyAMA0", "/dev/ttyAMA10"]
+EGYPT_TZ = ZoneInfo("Africa/Cairo")
+ARDUINO_COMMAND_INTERVAL_S = 0.025
 
 
 logging.basicConfig(
@@ -69,10 +72,16 @@ def parse_arduino_line(line):
         key, value = part.split("=", 1)
         data[key] = parse_value(value)
 
-    if "heading" in data:
-        data["yaw"] = data["heading"]
+    if "compass_heading" in data:
+        data["compassHeading"] = data["compass_heading"]
+    if "compass_raw_heading" in data:
+        data["compassRawHeading"] = data["compass_raw_heading"]
+    elif "heading" in data:
+        data["compassHeading"] = data["heading"]
+    if "gps_course" in data:
+        data["gpsCourse"] = data["gps_course"]
     if "gps_heading" in data:
-        data["gpsHeading"] = data["gps_heading"]
+        data["gpsCourse"] = data["gps_heading"]
     if "gps_speed" in data:
         data["gpsSpeed"] = data["gps_speed"]
     if "gps_hdop" in data:
@@ -99,6 +108,8 @@ class ArduinoLink:
         self.last_parsed_at = None
         self.connected_port = None
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
+        self.last_write_at = 0.0
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -144,9 +155,10 @@ class ArduinoLink:
                     if parsed.get("type") == "status":
                         self.latest_sensor = parsed
                         self.telemetry_count += 1
-                        self.last_parsed_at = datetime.now().isoformat()
+                        self.last_parsed_at = datetime.now(EGYPT_TZ).isoformat()
                     elif parsed.get("type") == "ack":
                         self.latest_ack = parsed
+                        self.latest_error = None
                     elif parsed.get("type") == "error":
                         self.latest_error = parsed
             except Exception as exc:
@@ -162,7 +174,15 @@ class ArduinoLink:
         if self.serial is None:
             return False
         try:
-            self.serial.write((command.strip() + "\n").encode("utf-8"))
+            with self.write_lock:
+                elapsed = time.monotonic() - self.last_write_at
+                if elapsed < ARDUINO_COMMAND_INTERVAL_S:
+                    time.sleep(ARDUINO_COMMAND_INTERVAL_S - elapsed)
+                self.serial.write((command.strip() + "\n").encode("utf-8"))
+                self.serial.flush()
+                self.last_write_at = time.monotonic()
+                with self.lock:
+                    self.latest_error = None
             return True
         except Exception as exc:
             logger.warning("Arduino write failed: %s", exc)
@@ -323,6 +343,51 @@ class RobotBridge:
         if msg_type == "turn_speed":
             return [f"TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"]
 
+        if msg_type == "auto_turn_speed":
+            return [f"AUTO TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"]
+
+        if msg_type == "compass_offset":
+            degrees = max(-180.0, min(180.0, float(data.get("degrees", 0))))
+            return [f"COMPASS OFFSET {degrees:.2f}"]
+
+        if msg_type == "speed_cap":
+            return [f"SPEED CAP {int(max(0, min(255, int(data.get('speed', 102)))))}"]
+
+        if msg_type == "motor_trim":
+            left = int(max(-50, min(50, int(data.get("left", 0)))))
+            right = int(max(-50, min(50, int(data.get("right", 0)))))
+            return [f"MOTOR TRIM {left} {right}"]
+
+        if msg_type == "encoder_pid":
+            kp = float(data.get("kp", 1))
+            ki = float(data.get("ki", 0))
+            kd = float(data.get("kd", 0))
+            return [f"ENCODER PID {kp:.3f} {ki:.3f} {kd:.3f}"]
+
+        if msg_type == "goto":
+            if "lat" not in data or "lng" not in data:
+                return []
+            lat = float(data.get("lat"))
+            lng = float(data.get("lng"))
+            return [f"GOTO {lat:.6f} {lng:.6f}"]
+
+        if msg_type == "wp_clear":
+            return ["WP CLEAR"]
+
+        if msg_type == "wp_add":
+            if "order" not in data or "lat" not in data or "lng" not in data:
+                return []
+            order = int(data.get("order"))
+            lat = float(data.get("lat"))
+            lng = float(data.get("lng"))
+            return [f"WP ADD {order} {lat:.6f} {lng:.6f}"]
+
+        if msg_type == "wp_start":
+            return ["WP START"]
+
+        if msg_type == "wp_stop":
+            return ["WP STOP"]
+
         if msg_type == "plot":
             mode = str(data.get("mode", "")).lower()
             if mode == "cont":
@@ -349,8 +414,11 @@ class RobotBridge:
             arduino_snapshot = self.arduino.snapshot()
             frame, frame_count, camera_error = self.camera.snapshot()
             last_command = self.command_history[-1] if self.command_history else None
+            now = datetime.now(EGYPT_TZ)
             payload = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now.isoformat(),
+                "timestamp_egypt": now.isoformat(),
+                "timestamp_ms": int(time.time() * 1000),
                 "arduino": arduino_snapshot["sensor"],
                 "raw": arduino_snapshot["raw"],
                 "stats": {

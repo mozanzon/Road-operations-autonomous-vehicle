@@ -16,6 +16,19 @@
     S                  stop drive and plotter
     SPEED <0-255>      set drive speed
     TURN SPEED <0-255> set 90-degree turn speed
+    SPEED CAP <0-255>  cap all drive/turn PWM commands
+    AUTO TURN SPEED <0-255>
+                       set heading correction turn speed
+    COMPASS OFFSET <deg>
+                       set QMC5883L compass heading correction (-180 to 180)
+    MOTOR TRIM <l> <r> add static left/right PWM bias (-50 to 50)
+    ENCODER PID <p> <i> <d>
+                       set encoder drift PID gains
+    GOTO <lat> <lng>   drive to one GPS waypoint, 2m arrival tolerance
+    WP CLEAR           clear waypoint queue
+    WP ADD <n> <lat> <lng>
+                       add ordered waypoint to queue
+    WP START / STOP    start or stop queued waypoint navigation
 
   Plotter commands:
     PLOT CONT          arm continuous plotting while moving
@@ -66,26 +79,40 @@ const float TICKS_PER_REV = 2400.0;
 const float ENCODER_PPR = 600.0;
 const float QUADRATURE_EDGES_PER_PULSE = 4.0;
 
-// Measure center-to-center distance between left and right wheels, then tune this.
-const float ROBOT_TRACK_WIDTH_M = 0.50;
+// Wheel diameter is 32 cm and wheelbase/track width is about 60 cm.
+const float ROBOT_TRACK_WIDTH_M = 0.60;
 
 const float TURN_ANGLE_DEG = 90.0;
 const float HEADING_TOLERANCE_DEG = 2.5;
 const unsigned long TURN_TIMEOUT_MS = 10000;
 const unsigned long TELEMETRY_INTERVAL_MS = 100;
+const unsigned long NAV_TIMEOUT_MS = 120000;
 
 const int MIN_TURN_PWM = 25;
 const int DEFAULT_DRIVE_SPEED = 160;
 const int DEFAULT_TURN_SPEED = 60;
+const int DEFAULT_SPEED_CAP = 102;
 const int DEFAULT_PLOTTER_SPEED = 180;
 const long SERIAL_BAUD_RATE = 115200;
 const long GPS_BAUD_RATE = 9600;
+const float NAV_ARRIVAL_TOLERANCE_M = 2.0;
+const float NAV_TURN_IN_PLACE_DEG = 45.0;
+const float NAV_HEADING_ADJUST_DEG = 8.0;
+const float NAV_SLOWDOWN_DISTANCE_M = 4.0;
+const float NAV_ENCODER_STEP_M = 1.50;
+const float NAV_TURN_ENCODER_LIMIT_MULTIPLIER = 1.25;
+const float NAV_EARTH_RADIUS_M = 6371000.0;
+const int MOTOR_TRIM_LIMIT = 50;
+const int MAX_WAYPOINTS = 20;
 
 volatile long leftEncoderTicks = 0;
 volatile long rightEncoderTicks = 0;
 
 int driveSpeed = DEFAULT_DRIVE_SPEED;
+int activeDriveSpeed = DEFAULT_DRIVE_SPEED;
 int turnSpeed = DEFAULT_TURN_SPEED;
+int speedCap = DEFAULT_SPEED_CAP;
+int autoTurnSpeed = DEFAULT_TURN_SPEED;
 int plotterSpeed = DEFAULT_PLOTTER_SPEED;
 bool driveIsMoving = false;
 int driveDirection = 0;
@@ -103,6 +130,12 @@ float dashGapDistanceM = 0.30;
 long dashSegmentStartLeftTicks = 0;
 long dashSegmentStartRightTicks = 0;
 
+struct NavWaypoint {
+  int order;
+  double lat;
+  double lng;
+};
+
 enum PlotterMode {
   PLOTTER_OFF,
   PLOTTER_CONT,
@@ -119,9 +152,46 @@ long lastSpeedRightTicks = 0;
 long lastSpeedLeftDelta = 0;
 long lastSpeedRightDelta = 0;
 float measuredSpeedMps = 0.0;
+int motorTrimLeft = 0;
+int motorTrimRight = 0;
+int lastHeadingCorrection = 0;
+int lastLeftCommandPwm = 0;
+int lastRightCommandPwm = 0;
+float lastHeadingErrorDeg = 0.0;
+float lastTargetBearingDeg = 0.0;
+float lastTargetDistanceM = 0.0;
+bool navActive = false;
+bool navArrived = false;
+double navTargetLat = 0.0;
+double navTargetLng = 0.0;
+unsigned long navStartMs = 0;
+NavWaypoint waypointQueue[MAX_WAYPOINTS];
+int waypointCount = 0;
+int waypointIndex = 0;
+bool navQueueActive = false;
+bool navDrivingSegment = false;
+bool navHeadingAdjusting = false;
+bool navTurnActive = false;
+long navSegmentStartLeftTicks = 0;
+long navSegmentStartRightTicks = 0;
+float navSegmentTargetM = 0.0;
+long navTurnStartLeftTicks = 0;
+long navTurnStartRightTicks = 0;
+long navTurnExpectedTicks = 0;
+int navTurnDirection = 0;
+float encoderPidKp = 1.0;
+float encoderPidKi = 0.0;
+float encoderPidKd = 0.0;
+float encoderPidIntegral = 0.0;
+float encoderPidLastError = 0.0;
+int lastEncoderPidOutput = 0;
+float lastEncoderErrorTicks = 0.0;
+bool compassOk = false;
+float lastCompassHeadingDeg = 0.0;
+float lastCompassRawHeadingDeg = 0.0;
+float compassOffsetDeg = 0.0;
 
 const float DRIVE_HEADING_KP = 1.0;
-const float DRIVE_ENCODER_KP = 0.025;
 const int DRIVE_TRIM_LIMIT = 35;
 
 void updateGps() {
@@ -147,7 +217,7 @@ void printGpsFields() {
   Serial.print(fix ? gps.location.lng() : 0.0, 6);
   Serial.print("|gps_speed=");
   Serial.print(gps.speed.isValid() ? gps.speed.mps() : 0.0, 3);
-  Serial.print("|gps_heading=");
+  Serial.print("|gps_course=");
   Serial.print(gps.course.isValid() ? gps.course.deg() : 0.0, 2);
   Serial.print("|gps_fix=");
   Serial.print(fix ? 1 : 0);
@@ -159,9 +229,72 @@ void printGpsFields() {
   Serial.print(gpsAgeMs());
 }
 
+void printCompassFields(float heading) {
+  Serial.print("|compass_raw_heading=");
+  Serial.print(lastCompassRawHeadingDeg, 2);
+  Serial.print("|compass_heading=");
+  Serial.print(heading, 2);
+  Serial.print("|compass_offset=");
+  Serial.print(compassOffsetDeg, 2);
+  Serial.print("|compass_ok=");
+  Serial.print(compassOk ? 1 : 0);
+}
+
+void printNavigationFields() {
+  Serial.print("|nav_active=");
+  Serial.print(navActive ? 1 : 0);
+  Serial.print("|arrived=");
+  Serial.print(navArrived ? 1 : 0);
+  Serial.print("|target_lat=");
+  Serial.print(navActive ? navTargetLat : 0.0, 6);
+  Serial.print("|target_lng=");
+  Serial.print(navActive ? navTargetLng : 0.0, 6);
+  Serial.print("|target_bearing=");
+  Serial.print(lastTargetBearingDeg, 2);
+  Serial.print("|target_distance_m=");
+  Serial.print(lastTargetDistanceM, 2);
+  Serial.print("|wp_active=");
+  Serial.print(navQueueActive ? 1 : 0);
+  Serial.print("|wp_count=");
+  Serial.print(waypointCount);
+  Serial.print("|wp_index=");
+  Serial.print(waypointIndex);
+  Serial.print("|heading_error=");
+  Serial.print(lastHeadingErrorDeg, 2);
+  Serial.print("|correction_trim=");
+  Serial.print(lastHeadingCorrection);
+  Serial.print("|heading_adjusting=");
+  Serial.print(navHeadingAdjusting ? 1 : 0);
+  Serial.print("|turn_active=");
+  Serial.print(navTurnActive ? 1 : 0);
+  Serial.print("|turn_expected_ticks=");
+  Serial.print(navTurnExpectedTicks);
+  Serial.print("|plotter_stopped_for_heading=");
+  Serial.print(navHeadingAdjusting ? 1 : 0);
+  Serial.print("|encoder_error=");
+  Serial.print(lastEncoderErrorTicks, 2);
+  Serial.print("|encoder_pid_kp=");
+  Serial.print(encoderPidKp, 3);
+  Serial.print("|encoder_pid_ki=");
+  Serial.print(encoderPidKi, 3);
+  Serial.print("|encoder_pid_kd=");
+  Serial.print(encoderPidKd, 3);
+  Serial.print("|encoder_pid_output=");
+  Serial.print(lastEncoderPidOutput);
+  Serial.print("|motor_trim_left=");
+  Serial.print(motorTrimLeft);
+  Serial.print("|motor_trim_right=");
+  Serial.print(motorTrimRight);
+  Serial.print("|left_pwm=");
+  Serial.print(lastLeftCommandPwm);
+  Serial.print("|right_pwm=");
+  Serial.print(lastRightCommandPwm);
+}
+
 void printGpsStatus() {
   Serial.print("STATUS");
   printGpsFields();
+  printNavigationFields();
   Serial.print("|gps_only=");
   Serial.println(gpsOnlyMode ? 1 : 0);
 }
@@ -199,9 +332,18 @@ float normalizeHeading(float heading) {
   return heading;
 }
 
+void initCompass() {
+  compass.init();
+  delay(10);
+  compassOk = true;
+}
+
 float readHeading() {
   compass.read();
-  return normalizeHeading(compass.getAzimuth());
+  lastCompassRawHeadingDeg = normalizeHeading((float)compass.getAzimuth());
+  lastCompassHeadingDeg = normalizeHeading(lastCompassRawHeadingDeg + compassOffsetDeg);
+  compassOk = true;
+  return lastCompassHeadingDeg;
 }
 
 float headingError(float target, float current) {
@@ -209,6 +351,36 @@ float headingError(float target, float current) {
   if (error > 180.0) error -= 360.0;
   if (error < -180.0) error += 360.0;
   return error;
+}
+
+float degreesToRadians(float degrees) {
+  return degrees * PI / 180.0;
+}
+
+float radiansToDegrees(float radians) {
+  return radians * 180.0 / PI;
+}
+
+float gpsDistanceMeters(double fromLat, double fromLng, double toLat, double toLng) {
+  float fromLatRad = degreesToRadians(fromLat);
+  float toLatRad = degreesToRadians(toLat);
+  float dLatRad = degreesToRadians(toLat - fromLat);
+  float dLngRad = degreesToRadians(toLng - fromLng);
+
+  float sinHalfLat = sin(dLatRad / 2.0);
+  float sinHalfLng = sin(dLngRad / 2.0);
+  float a = (sinHalfLat * sinHalfLat) + (cos(fromLatRad) * cos(toLatRad) * sinHalfLng * sinHalfLng);
+  float c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+  return NAV_EARTH_RADIUS_M * c;
+}
+
+float gpsBearingDegrees(double fromLat, double fromLng, double toLat, double toLng) {
+  float fromLatRad = degreesToRadians(fromLat);
+  float toLatRad = degreesToRadians(toLat);
+  float dLngRad = degreesToRadians(toLng - fromLng);
+  float y = sin(dLngRad) * cos(toLatRad);
+  float x = (cos(fromLatRad) * sin(toLatRad)) - (sin(fromLatRad) * cos(toLatRad) * cos(dLngRad));
+  return normalizeHeading(radiansToDegrees(atan2(y, x)));
 }
 
 float wheelCircumferenceM() {
@@ -254,6 +426,22 @@ float dashSegmentTravelDistanceM() {
   return (leftDistance + rightDistance) / 2.0;
 }
 
+float navSegmentTravelDistanceM() {
+  long leftTicks;
+  long rightTicks;
+  readEncoderTicks(leftTicks, rightTicks);
+
+  float leftDistance = ticksToDistanceM(leftTicks - navSegmentStartLeftTicks);
+  float rightDistance = ticksToDistanceM(rightTicks - navSegmentStartRightTicks);
+  return (leftDistance + rightDistance) / 2.0;
+}
+
+void resetEncoderPid() {
+  encoderPidIntegral = 0.0;
+  encoderPidLastError = 0.0;
+  lastEncoderPidOutput = 0;
+}
+
 void updateMeasuredSpeed() {
   unsigned long now = millis();
   if (now - lastSpeedSampleMs < TELEMETRY_INTERVAL_MS) return;
@@ -282,6 +470,10 @@ const char *plotterModeName() {
   return "OFF";
 }
 
+int cappedDrivePwm(int speed) {
+  return constrain(speed, 0, speedCap);
+}
+
 void writeDrivePwm(int leftForward, int leftBackward, int rightForward, int rightBackward) {
   analogWrite(M1_RPWM, constrain(leftForward, 0, 255));
   analogWrite(M1_LPWM, constrain(leftBackward, 0, 255));
@@ -289,9 +481,45 @@ void writeDrivePwm(int leftForward, int leftBackward, int rightForward, int righ
   analogWrite(M2_LPWM, constrain(rightBackward, 0, 255));
 }
 
+void applyForwardPwm(int leftPwm, int rightPwm) {
+  lastLeftCommandPwm = constrain(leftPwm + motorTrimLeft, 0, speedCap);
+  lastRightCommandPwm = constrain(rightPwm + motorTrimRight, 0, speedCap);
+  writeDrivePwm(lastLeftCommandPwm, 0, lastRightCommandPwm, 0);
+}
+
+void applyBackwardPwm(int leftPwm, int rightPwm) {
+  lastLeftCommandPwm = constrain(leftPwm + motorTrimLeft, 0, speedCap);
+  lastRightCommandPwm = constrain(rightPwm + motorTrimRight, 0, speedCap);
+  writeDrivePwm(0, lastLeftCommandPwm, 0, lastRightCommandPwm);
+}
+
+void beginForwardMotion(int speed) {
+  speed = cappedDrivePwm(speed);
+  activeDriveSpeed = speed;
+  driveIsMoving = speed > 0;
+  driveDirection = driveIsMoving ? 1 : 0;
+  navHeadingAdjusting = false;
+  readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
+  applyForwardPwm(speed, speed);
+}
+
+void beginBackwardMotion(int speed) {
+  speed = cappedDrivePwm(speed);
+  activeDriveSpeed = speed;
+  driveIsMoving = speed > 0;
+  driveDirection = driveIsMoving ? -1 : 0;
+  navHeadingAdjusting = false;
+  readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
+  applyBackwardPwm(speed, speed);
+}
+
 void stopDrive() {
   driveIsMoving = false;
   driveDirection = 0;
+  navDrivingSegment = false;
+  navHeadingAdjusting = false;
+  lastLeftCommandPwm = 0;
+  lastRightCommandPwm = 0;
   writeDrivePwm(0, 0, 0, 0);
   stopPlotterMotor();
   plotDistanceStartSet = false;
@@ -299,38 +527,40 @@ void stopDrive() {
 }
 
 void driveForward(int speed) {
-  speed = constrain(speed, 0, 255);
-  driveIsMoving = speed > 0;
-  driveDirection = driveIsMoving ? 1 : 0;
+  speed = cappedDrivePwm(speed);
   driveTargetHeading = readHeading();
-  readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
-  writeDrivePwm(speed, 0, speed, 0);
+  beginForwardMotion(speed);
   Serial.print("ACK:FORWARD|speed=");
   Serial.println(speed);
 }
 
 void driveBackward(int speed) {
-  speed = constrain(speed, 0, 255);
-  driveIsMoving = speed > 0;
-  driveDirection = driveIsMoving ? -1 : 0;
+  speed = cappedDrivePwm(speed);
   driveTargetHeading = readHeading();
-  readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
-  writeDrivePwm(0, speed, 0, speed);
+  beginBackwardMotion(speed);
   Serial.print("ACK:BACKWARD|speed=");
   Serial.println(speed);
 }
 
 void startSpinLeft(int speed) {
-  speed = constrain(speed, 0, 255);
+  speed = cappedDrivePwm(speed);
   driveIsMoving = speed > 0;
   driveDirection = 0;
+  navDrivingSegment = false;
+  navHeadingAdjusting = speed > 0;
+  lastLeftCommandPwm = speed;
+  lastRightCommandPwm = speed;
   writeDrivePwm(0, speed, speed, 0);
 }
 
 void startSpinRight(int speed) {
-  speed = constrain(speed, 0, 255);
+  speed = cappedDrivePwm(speed);
   driveIsMoving = speed > 0;
   driveDirection = 0;
+  navDrivingSegment = false;
+  navHeadingAdjusting = speed > 0;
+  lastLeftCommandPwm = speed;
+  lastRightCommandPwm = speed;
   writeDrivePwm(speed, 0, 0, speed);
 }
 
@@ -346,13 +576,21 @@ void updateDriveControl() {
   float currentHeading = readHeading();
   float hError = headingError(driveTargetHeading, currentHeading);
   float encoderError = (float)(leftDelta - rightDelta);
-  int trim = constrain((int)((hError * DRIVE_HEADING_KP) + (encoderError * DRIVE_ENCODER_KP)), -DRIVE_TRIM_LIMIT, DRIVE_TRIM_LIMIT);
+  encoderPidIntegral = constrain(encoderPidIntegral + encoderError, -2000.0, 2000.0);
+  float encoderDerivative = encoderError - encoderPidLastError;
+  encoderPidLastError = encoderError;
+  int encoderPidOutput = constrain((int)((encoderError * encoderPidKp) + (encoderPidIntegral * encoderPidKi) + (encoderDerivative * encoderPidKd)), -DRIVE_TRIM_LIMIT, DRIVE_TRIM_LIMIT);
+  int trim = constrain((int)(hError * DRIVE_HEADING_KP) + encoderPidOutput, -DRIVE_TRIM_LIMIT, DRIVE_TRIM_LIMIT);
+  lastHeadingErrorDeg = hError;
+  lastHeadingCorrection = trim;
+  lastEncoderErrorTicks = encoderError;
+  lastEncoderPidOutput = encoderPidOutput;
 
-  int leftPwm = constrain(driveSpeed - trim, 0, 255);
-  int rightPwm = constrain(driveSpeed + trim, 0, 255);
+  int leftPwm = constrain(activeDriveSpeed - trim, 0, 255);
+  int rightPwm = constrain(activeDriveSpeed + trim, 0, 255);
 
-  if (driveDirection > 0) writeDrivePwm(leftPwm, 0, rightPwm, 0);
-  else writeDrivePwm(0, leftPwm, 0, rightPwm);
+  if (driveDirection > 0) applyForwardPwm(leftPwm, rightPwm);
+  else applyBackwardPwm(leftPwm, rightPwm);
 }
 
 void runPlotterForward(int speed) {
@@ -387,6 +625,11 @@ void setPlotterMode(PlotterMode mode) {
 }
 
 void updatePlotter() {
+  if (navHeadingAdjusting) {
+    stopPlotterMotor();
+    return;
+  }
+
   if (!driveIsMoving) {
     stopPlotterMotor();
     plotterDashMotorOn = true;
@@ -439,6 +682,276 @@ void updatePlotter() {
   else stopPlotterMotor();
 }
 
+void clearNavigationState(bool arrived) {
+  navActive = false;
+  navArrived = arrived;
+  navQueueActive = false;
+  navDrivingSegment = false;
+  navHeadingAdjusting = false;
+  navTurnActive = false;
+  navTurnExpectedTicks = 0;
+  navTurnDirection = 0;
+  lastTargetDistanceM = 0.0;
+  lastTargetBearingDeg = 0.0;
+}
+
+void stopNavigation(bool arrived) {
+  clearNavigationState(arrived);
+  stopDrive();
+}
+
+void clearWaypointQueue() {
+  waypointCount = 0;
+  waypointIndex = 0;
+  navActive = false;
+  navArrived = false;
+  navQueueActive = false;
+  navDrivingSegment = false;
+  navHeadingAdjusting = false;
+  navTurnActive = false;
+  navTurnExpectedTicks = 0;
+  navTurnDirection = 0;
+  lastTargetDistanceM = 0.0;
+  lastTargetBearingDeg = 0.0;
+}
+
+void sortWaypointQueue() {
+  for (int i = 0; i < waypointCount - 1; i++) {
+    for (int j = i + 1; j < waypointCount; j++) {
+      if (waypointQueue[j].order < waypointQueue[i].order) {
+        NavWaypoint tmp = waypointQueue[i];
+        waypointQueue[i] = waypointQueue[j];
+        waypointQueue[j] = tmp;
+      }
+    }
+  }
+}
+
+bool addWaypointToQueue(int order, double lat, double lng) {
+  if (waypointCount >= MAX_WAYPOINTS) return false;
+  waypointQueue[waypointCount].order = order;
+  waypointQueue[waypointCount].lat = lat;
+  waypointQueue[waypointCount].lng = lng;
+  waypointCount++;
+  sortWaypointQueue();
+  return true;
+}
+
+void loadActiveWaypoint() {
+  navTargetLat = waypointQueue[waypointIndex].lat;
+  navTargetLng = waypointQueue[waypointIndex].lng;
+  navStartMs = millis();
+  navActive = true;
+  navArrived = false;
+  navDrivingSegment = false;
+  navHeadingAdjusting = false;
+  navTurnActive = false;
+  navTurnExpectedTicks = 0;
+  navTurnDirection = 0;
+  driveTargetHeading = readHeading();
+  readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
+  resetEncoderPid();
+}
+
+void startNavigation(double targetLat, double targetLng) {
+  if (!gpsHasFix()) {
+    Serial.println("ERROR:GOTO_requires_valid_gps_fix");
+    return;
+  }
+
+  gpsOnlyMode = false;
+  navQueueActive = false;
+  waypointIndex = 0;
+  navTargetLat = targetLat;
+  navTargetLng = targetLng;
+  navStartMs = millis();
+  navActive = true;
+  navArrived = false;
+  navDrivingSegment = false;
+  navHeadingAdjusting = false;
+  navTurnActive = false;
+  navTurnExpectedTicks = 0;
+  navTurnDirection = 0;
+  driveTargetHeading = readHeading();
+  readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
+  resetEncoderPid();
+
+  Serial.print("ACK:GOTO|target_lat=");
+  Serial.print(navTargetLat, 6);
+  Serial.print("|target_lng=");
+  Serial.println(navTargetLng, 6);
+}
+
+void startWaypointQueue() {
+  if (waypointCount <= 0) {
+    Serial.println("ERROR:WP_queue_empty");
+    return;
+  }
+
+  if (!gpsHasFix()) {
+    Serial.println("ERROR:WP_START_requires_valid_gps_fix");
+    return;
+  }
+
+  gpsOnlyMode = false;
+  navQueueActive = true;
+  waypointIndex = 0;
+  loadActiveWaypoint();
+  Serial.print("ACK:WP_START|count=");
+  Serial.println(waypointCount);
+}
+
+long expectedTurnTicksForAngle(float angleDeg) {
+  float expectedWheelTravelM = (PI * ROBOT_TRACK_WIDTH_M) * (abs(angleDeg) / 360.0);
+  return max(1L, (long)(expectedWheelTravelM / wheelCircumferenceM() * TICKS_PER_REV));
+}
+
+long navTurnEncoderDelta() {
+  long leftTicks;
+  long rightTicks;
+  readEncoderTicks(leftTicks, rightTicks);
+  long leftDelta = abs(leftTicks - navTurnStartLeftTicks);
+  long rightDelta = abs(rightTicks - navTurnStartRightTicks);
+  return (leftDelta + rightDelta) / 2;
+}
+
+void beginNavigationTurn(float headingErrorDeg) {
+  stopDrive();
+  navDrivingSegment = false;
+  navHeadingAdjusting = true;
+  navTurnActive = true;
+  navTurnDirection = headingErrorDeg < 0.0 ? -1 : 1;
+  navTurnExpectedTicks = expectedTurnTicksForAngle(headingErrorDeg);
+  readEncoderTicks(navTurnStartLeftTicks, navTurnStartRightTicks);
+  Serial.print("ACK:NAV_TURN_START|error=");
+  Serial.print(headingErrorDeg, 2);
+  Serial.print("|direction=");
+  Serial.print(navTurnDirection);
+  Serial.print("|expected_ticks=");
+  Serial.println(navTurnExpectedTicks);
+}
+
+bool updateNavigationTurn(float headingErrorDeg) {
+  if (!navTurnActive) beginNavigationTurn(headingErrorDeg);
+
+  long encoderDelta = navTurnEncoderDelta();
+  if (abs(headingErrorDeg) <= HEADING_TOLERANCE_DEG) {
+    stopDrive();
+    navTurnActive = false;
+    navHeadingAdjusting = false;
+    navTurnExpectedTicks = 0;
+    Serial.print("ACK:NAV_TURN_DONE|heading_error=");
+    Serial.println(headingErrorDeg, 2);
+    return true;
+  }
+
+  if (navTurnExpectedTicks > 0 && encoderDelta > (long)(navTurnExpectedTicks * NAV_TURN_ENCODER_LIMIT_MULTIPLIER)) {
+    stopDrive();
+    navTurnActive = false;
+    navHeadingAdjusting = false;
+    navTurnExpectedTicks = 0;
+    Serial.println("WARN:NAV_TURN_ENCODER_LIMIT");
+    return true;
+  }
+
+  int previousTurnSpeed = turnSpeed;
+  turnSpeed = autoTurnSpeed;
+  int turnPwm = turnPwmForError(headingErrorDeg, encoderDelta, navTurnExpectedTicks);
+  turnSpeed = previousTurnSpeed;
+  if (headingErrorDeg < 0.0) startSpinLeft(turnPwm);
+  else startSpinRight(turnPwm);
+  return false;
+}
+
+void advanceWaypointOrStop(float distanceM) {
+  Serial.print("ACK:WP_ARRIVED|index=");
+  Serial.print(waypointIndex);
+  Serial.print("|distance_m=");
+  Serial.println(distanceM, 2);
+
+  if (navQueueActive && waypointIndex + 1 < waypointCount) {
+    waypointIndex++;
+    loadActiveWaypoint();
+    return;
+  }
+
+  navQueueActive = false;
+  waypointIndex = min(waypointIndex, max(0, waypointCount - 1));
+  Serial.println("ACK:WP_DONE");
+  stopNavigation(true);
+}
+
+void updateNavigation() {
+  if (!navActive) return;
+
+  if (!gpsHasFix()) {
+    Serial.println("WARN:NAV_STOPPED_GPS_FIX_LOST");
+    stopNavigation(false);
+    return;
+  }
+
+  if (millis() - navStartMs > NAV_TIMEOUT_MS) {
+    Serial.println("WARN:NAV_TIMEOUT");
+    stopNavigation(false);
+    return;
+  }
+
+  if (driveSpeed <= 0) {
+    Serial.println("WARN:NAV_STOPPED_ZERO_DRIVE_SPEED");
+    stopNavigation(false);
+    return;
+  }
+
+  double currentLat = gps.location.lat();
+  double currentLng = gps.location.lng();
+  float distanceM = gpsDistanceMeters(currentLat, currentLng, navTargetLat, navTargetLng);
+  float bearingDeg = gpsBearingDegrees(currentLat, currentLng, navTargetLat, navTargetLng);
+  float currentHeading = readHeading();
+  float hError = headingError(bearingDeg, currentHeading);
+
+  lastTargetDistanceM = distanceM;
+  lastTargetBearingDeg = bearingDeg;
+  lastHeadingErrorDeg = hError;
+
+  if (distanceM <= NAV_ARRIVAL_TOLERANCE_M) {
+    advanceWaypointOrStop(distanceM);
+    return;
+  }
+
+  driveTargetHeading = bearingDeg;
+
+  if (navTurnActive || abs(hError) > NAV_HEADING_ADJUST_DEG) {
+    updateNavigationTurn(hError);
+    return;
+  }
+
+  navHeadingAdjusting = false;
+  int navSpeed = cappedDrivePwm(driveSpeed);
+  if (distanceM < NAV_SLOWDOWN_DISTANCE_M) {
+    navSpeed = map((int)(distanceM * 100.0), (int)(NAV_ARRIVAL_TOLERANCE_M * 100.0), (int)(NAV_SLOWDOWN_DISTANCE_M * 100.0), MIN_TURN_PWM, cappedDrivePwm(driveSpeed));
+  }
+  int minForwardPwm = min(MIN_TURN_PWM, cappedDrivePwm(driveSpeed));
+  navSpeed = constrain(navSpeed, minForwardPwm, cappedDrivePwm(driveSpeed));
+
+  if (!navDrivingSegment) {
+    readEncoderTicks(navSegmentStartLeftTicks, navSegmentStartRightTicks);
+    navSegmentTargetM = min(NAV_ENCODER_STEP_M, max(0.10, distanceM - NAV_ARRIVAL_TOLERANCE_M));
+    navDrivingSegment = true;
+    resetEncoderPid();
+  }
+
+  if (navSegmentTravelDistanceM() >= navSegmentTargetM) {
+    stopDrive();
+    navDrivingSegment = false;
+    return;
+  }
+
+  if (!driveIsMoving || driveDirection != 1) {
+    beginForwardMotion(navSpeed);
+  }
+  activeDriveSpeed = navSpeed;
+}
+
 void printStatus() {
   long leftTicks;
   long rightTicks;
@@ -448,8 +961,7 @@ void printStatus() {
   Serial.print("STATUS");
   Serial.print("|heading=");
   Serial.print(heading, 2);
-  Serial.print("|yaw=");
-  Serial.print(heading, 2);
+  printCompassFields(heading);
   Serial.print("|e1=");
   Serial.print(leftTicks);
   Serial.print("|e2=");
@@ -465,15 +977,22 @@ void printStatus() {
   Serial.print("|speed=");
   Serial.print(measuredSpeedMps, 3);
   Serial.print("|lspeed=");
-  Serial.print(driveIsMoving ? driveSpeed : 0);
+  Serial.print(driveIsMoving ? lastLeftCommandPwm : 0);
   Serial.print("|rspeed=");
-  Serial.print(driveIsMoving ? driveSpeed : 0);
+  Serial.print(driveIsMoving ? lastRightCommandPwm : 0);
   Serial.print("|battery=0");
   printGpsFields();
+  printNavigationFields();
   Serial.print("|drive_speed=");
   Serial.print(driveSpeed);
+  Serial.print("|active_drive_speed=");
+  Serial.print(activeDriveSpeed);
   Serial.print("|turn_speed=");
   Serial.print(turnSpeed);
+  Serial.print("|auto_turn_speed=");
+  Serial.print(autoTurnSpeed);
+  Serial.print("|speed_cap=");
+  Serial.print(speedCap);
   Serial.print("|drive_moving=");
   Serial.print(driveIsMoving ? 1 : 0);
   Serial.print("|wheel_radius_m=");
@@ -519,7 +1038,7 @@ bool abortTurnCommandReceived() {
 }
 
 int turnPwmForError(float errorDeg, long encoderDelta, long expectedTicks) {
-  int maxTurnPwm = constrain(turnSpeed, MIN_TURN_PWM, 255);
+  int maxTurnPwm = constrain(turnSpeed, MIN_TURN_PWM, speedCap);
   float absError = abs(errorDeg);
 
   int headingPwm = map(constrain((int)absError, 0, 90), 0, 90, MIN_TURN_PWM, maxTurnPwm);
@@ -599,6 +1118,7 @@ void turnNinety(int direction) {
 }
 
 void stopAll() {
+  clearNavigationState(false);
   stopDrive();
   setPlotterMode(PLOTTER_OFF);
 }
@@ -609,6 +1129,15 @@ void printHelp() {
   Serial.println("  W / X / A / D / S       forward / backward / left 90 / right 90 / stop all");
   Serial.println("  SPEED <0-255>           set drive speed");
   Serial.println("  TURN SPEED <0-255>      set slower/faster turn speed");
+  Serial.println("  SPEED CAP <0-255>       cap all drive and turn PWM");
+  Serial.println("  AUTO TURN SPEED <0-255> set autonomous heading turn speed");
+  Serial.println("  COMPASS OFFSET <deg>    QMC5883L correction added to raw compass heading");
+  Serial.println("  MOTOR TRIM <l> <r>      static left/right PWM bias (-50 to 50)");
+  Serial.println("  ENCODER PID <p> <i> <d> encoder drift PID gains");
+  Serial.println("  GOTO <lat> <lng>        drive to one GPS waypoint, stops within 2m");
+  Serial.println("  WP CLEAR                clear queued waypoints");
+  Serial.println("  WP ADD <n> <lat> <lng>  add ordered waypoint to queue");
+  Serial.println("  WP START / WP STOP      start or stop queued waypoint navigation");
   Serial.println("  PLOT CONT               plotter continuous while moving");
   Serial.println("  PLOT DASH               plotter dashed while moving");
   Serial.println("  PLOT DASH DIST <d> <g>  dashed plot/gap distances in meters");
@@ -631,26 +1160,114 @@ void handleCommand(String cmd) {
 
   if (cmd == "W") {
     gpsOnlyMode = false;
+    clearNavigationState(false);
     driveForward(driveSpeed);
   } else if (cmd == "X") {
     gpsOnlyMode = false;
+    clearNavigationState(false);
     driveBackward(driveSpeed);
   } else if (cmd == "A") {
     gpsOnlyMode = false;
+    clearNavigationState(false);
     turnNinety(-1);
   } else if (cmd == "D") {
     gpsOnlyMode = false;
+    clearNavigationState(false);
     turnNinety(1);
   } else if (cmd == "S" || cmd == "STOP") {
     stopAll();
+  } else if (cmd.startsWith("SPEED CAP ")) {
+    speedCap = constrain(cmd.substring(10).toInt(), 0, 255);
+    driveSpeed = cappedDrivePwm(driveSpeed);
+    turnSpeed = cappedDrivePwm(turnSpeed);
+    autoTurnSpeed = cappedDrivePwm(autoTurnSpeed);
+    Serial.print("ACK:SPEED_CAP|speed_cap=");
+    Serial.println(speedCap);
   } else if (cmd.startsWith("SPEED ")) {
-    driveSpeed = constrain(cmd.substring(6).toInt(), 0, 255);
+    driveSpeed = cappedDrivePwm(cmd.substring(6).toInt());
     Serial.print("ACK:SPEED|drive_speed=");
     Serial.println(driveSpeed);
   } else if (cmd.startsWith("TURN SPEED ")) {
-    turnSpeed = constrain(cmd.substring(11).toInt(), 0, 255);
+    turnSpeed = cappedDrivePwm(cmd.substring(11).toInt());
     Serial.print("ACK:TURN_SPEED|speed=");
     Serial.println(turnSpeed);
+  } else if (cmd.startsWith("AUTO TURN SPEED ")) {
+    autoTurnSpeed = cappedDrivePwm(cmd.substring(16).toInt());
+    Serial.print("ACK:AUTO_TURN_SPEED|speed=");
+    Serial.println(autoTurnSpeed);
+  } else if (cmd.startsWith("COMPASS OFFSET ")) {
+    compassOffsetDeg = constrain(cmd.substring(15).toFloat(), -180.0, 180.0);
+    Serial.print("ACK:COMPASS_OFFSET|degrees=");
+    Serial.println(compassOffsetDeg, 2);
+  } else if (cmd.startsWith("MOTOR TRIM ")) {
+    int valuesStart = 11;
+    int separator = cmd.indexOf(' ', valuesStart);
+    if (separator < 0) {
+      Serial.println("ERROR:Use_MOTOR_TRIM_left_bias_right_bias");
+      return;
+    }
+    motorTrimLeft = constrain(cmd.substring(valuesStart, separator).toInt(), -MOTOR_TRIM_LIMIT, MOTOR_TRIM_LIMIT);
+    motorTrimRight = constrain(cmd.substring(separator + 1).toInt(), -MOTOR_TRIM_LIMIT, MOTOR_TRIM_LIMIT);
+    Serial.print("ACK:MOTOR_TRIM|left=");
+    Serial.print(motorTrimLeft);
+    Serial.print("|right=");
+    Serial.println(motorTrimRight);
+  } else if (cmd.startsWith("ENCODER PID ")) {
+    int valuesStart = 12;
+    int firstSeparator = cmd.indexOf(' ', valuesStart);
+    int secondSeparator = firstSeparator < 0 ? -1 : cmd.indexOf(' ', firstSeparator + 1);
+    if (firstSeparator < 0 || secondSeparator < 0) {
+      Serial.println("ERROR:Use_ENCODER_PID_kp_ki_kd");
+      return;
+    }
+    encoderPidKp = cmd.substring(valuesStart, firstSeparator).toFloat();
+    encoderPidKi = cmd.substring(firstSeparator + 1, secondSeparator).toFloat();
+    encoderPidKd = cmd.substring(secondSeparator + 1).toFloat();
+    resetEncoderPid();
+    Serial.print("ACK:ENCODER_PID|kp=");
+    Serial.print(encoderPidKp, 3);
+    Serial.print("|ki=");
+    Serial.print(encoderPidKi, 3);
+    Serial.print("|kd=");
+    Serial.println(encoderPidKd, 3);
+  } else if (cmd.startsWith("GOTO ")) {
+    int valuesStart = 5;
+    int separator = cmd.indexOf(' ', valuesStart);
+    if (separator < 0) {
+      Serial.println("ERROR:Use_GOTO_lat_lng");
+      return;
+    }
+    double targetLat = cmd.substring(valuesStart, separator).toFloat();
+    double targetLng = cmd.substring(separator + 1).toFloat();
+    startNavigation(targetLat, targetLng);
+  } else if (cmd == "WP CLEAR") {
+    clearWaypointQueue();
+    stopDrive();
+    Serial.println("ACK:WP_CLEAR");
+  } else if (cmd.startsWith("WP ADD ")) {
+    int valuesStart = 7;
+    int firstSeparator = cmd.indexOf(' ', valuesStart);
+    int secondSeparator = firstSeparator < 0 ? -1 : cmd.indexOf(' ', firstSeparator + 1);
+    if (firstSeparator < 0 || secondSeparator < 0) {
+      Serial.println("ERROR:Use_WP_ADD_order_lat_lng");
+      return;
+    }
+    int order = cmd.substring(valuesStart, firstSeparator).toInt();
+    double targetLat = cmd.substring(firstSeparator + 1, secondSeparator).toFloat();
+    double targetLng = cmd.substring(secondSeparator + 1).toFloat();
+    if (!addWaypointToQueue(order, targetLat, targetLng)) {
+      Serial.println("ERROR:WP_queue_full");
+      return;
+    }
+    Serial.print("ACK:WP_ADD|order=");
+    Serial.print(order);
+    Serial.print("|count=");
+    Serial.println(waypointCount);
+  } else if (cmd == "WP START") {
+    startWaypointQueue();
+  } else if (cmd == "WP STOP") {
+    stopNavigation(false);
+    Serial.println("ACK:WP_STOP");
   } else if (cmd == "PLOT CONT" || cmd == "CONT") {
     setPlotterMode(PLOTTER_CONT);
   } else if (cmd == "PLOT DASH" || cmd == "DASH") {
@@ -766,7 +1383,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_RIGHT_B), onRightB, CHANGE);
 
   Wire.begin();
-  compass.init();
+  initCompass();
 
   stopAll();
   readEncoderTicks(lastSpeedLeftTicks, lastSpeedRightTicks);
@@ -791,6 +1408,7 @@ void loop() {
   }
 
   updateMeasuredSpeed();
+  updateNavigation();
   updateDriveControl();
   updatePlotter();
   printStatusIfDue();

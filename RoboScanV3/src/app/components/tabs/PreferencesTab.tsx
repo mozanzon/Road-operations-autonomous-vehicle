@@ -1,5 +1,5 @@
 import React from 'react';
-import { Settings, Sun, Moon, Ruler, AlertTriangle, Clock, Map, KeyRound, BrainCircuit } from 'lucide-react';
+import { Settings, Sun, Moon, Ruler, AlertTriangle, Clock, Map, KeyRound, BrainCircuit, Gauge, Camera, Compass } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 import { useRobot } from '../../context/RobotContext';
 
@@ -53,6 +53,26 @@ function ThresholdSlider({ label, value, onChange, min, max, step, unit, dangerA
   );
 }
 
+function NumberPref({ label, value, unit, onChange, isDark }: {
+  label: string; value: number; unit: string; onChange: (v: number) => void; isDark: boolean;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className={`text-xs font-mono uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{label}</span>
+      <div className={`flex items-center gap-2 rounded border px-2 py-1.5 ${isDark ? 'border-slate-600 bg-slate-800 text-slate-100' : 'border-slate-300 bg-white text-slate-900'}`}>
+        <input
+          type="number"
+          value={value}
+          step={unit === 'px' ? 1 : 0.1}
+          onChange={(event) => onChange(Number(event.target.value))}
+          className="w-20 bg-transparent text-xs font-mono outline-none"
+        />
+        <span className="text-xs text-slate-500">{unit}</span>
+      </div>
+    </label>
+  );
+}
+
 export function PreferencesTab() {
   const { theme, toggleTheme, isDark } = useTheme();
   const {
@@ -64,6 +84,12 @@ export function PreferencesTab() {
     mapTileSource, setMapTileSource,
     selectedModelPath, setSelectedModelPath,
     tomTomApiKey, setTomTomApiKey,
+    robotSpeedCap, setRobotSpeedCap,
+    autoTurnSpeed, setAutoTurnSpeed,
+    cameraCalibration, setCameraCalibration,
+    compassOffset, setCompassOffset,
+    alignRobotFrontToHeading, setAlignRobotFrontToHeading,
+    imageProcessing, setImageProcessing,
   } = useRobot();
 
   const mapSources = [
@@ -131,6 +157,51 @@ export function PreferencesTab() {
             ? 'Distances in meters/km · Speeds in km/h · Weights in kg'
             : 'Distances in feet/miles · Speeds in mph · Weights in lbs'}
         </div>
+      </Section>
+
+      <Section title="Robot Motion" icon={<Gauge className="h-4 w-4 text-amber-400" />} isDark={isDark}>
+        <ThresholdSlider label="Global Robot Speed Cap" value={robotSpeedCap} onChange={setRobotSpeedCap}
+          min={0.05} max={1} step={0.05} unit="m/s" dangerAbove={0.7} isDark={isDark} />
+        <ThresholdSlider label="Auto Heading Turn Speed" value={autoTurnSpeed} onChange={setAutoTurnSpeed}
+          min={0.05} max={robotSpeedCap} step={0.05} unit="m/s" dangerAbove={Math.max(0.05, robotSpeedCap * 0.8)} isDark={isDark} />
+        <div className={`text-xs font-mono rounded p-3 border ${infoBox}`}>
+          Manual, semi-scripted, and autonomous commands are clamped to the global cap before PWM conversion.
+        </div>
+      </Section>
+
+      <Section title="Camera Calibration" icon={<Camera className="h-4 w-4 text-amber-400" />} isDark={isDark}>
+        <div className="grid grid-cols-2 gap-3">
+          <NumberPref label="Height" value={cameraCalibration.heightCm} unit="cm" onChange={(heightCm) => setCameraCalibration({ heightCm })} isDark={isDark} />
+          <NumberPref label="Tilt" value={cameraCalibration.tiltDeg} unit="deg" onChange={(tiltDeg) => setCameraCalibration({ tiltDeg })} isDark={isDark} />
+          <NumberPref label="Horizontal FOV" value={cameraCalibration.horizontalFovDeg} unit="deg" onChange={(horizontalFovDeg) => setCameraCalibration({ horizontalFovDeg })} isDark={isDark} />
+          <NumberPref label="Vertical FOV" value={cameraCalibration.verticalFovDeg} unit="deg" onChange={(verticalFovDeg) => setCameraCalibration({ verticalFovDeg })} isDark={isDark} />
+          <NumberPref label="Stream Width" value={cameraCalibration.streamWidth} unit="px" onChange={(streamWidth) => setCameraCalibration({ streamWidth })} isDark={isDark} />
+          <NumberPref label="Stream Height" value={cameraCalibration.streamHeight} unit="px" onChange={(streamHeight) => setCameraCalibration({ streamHeight })} isDark={isDark} />
+          <NumberPref label="Front Offset" value={cameraCalibration.forwardOffsetCm} unit="cm" onChange={(forwardOffsetCm) => setCameraCalibration({ forwardOffsetCm })} isDark={isDark} />
+        </div>
+      </Section>
+
+      <Section title="Compass Calibration" icon={<Compass className="h-4 w-4 text-amber-400" />} isDark={isDark}>
+        <ThresholdSlider label="Compass Offset" value={compassOffset} onChange={setCompassOffset}
+          min={-180} max={180} step={1} unit="deg" isDark={isDark} />
+        <PreferenceRow label="Align robot front pointer" description="Rotate the map robot marker by calibrated heading" isDark={isDark}>
+          <input type="checkbox" checked={alignRobotFrontToHeading} onChange={(event) => setAlignRobotFrontToHeading(event.target.checked)} />
+        </PreferenceRow>
+      </Section>
+
+      <Section title="Image Processing" icon={<Camera className="h-4 w-4 text-amber-400" />} isDark={isDark}>
+        <PreferenceRow label="Enable preprocessing" description="Applies UI-side brightness and contrast correction before detection" isDark={isDark}>
+          <input type="checkbox" checked={imageProcessing.enabled} onChange={(event) => setImageProcessing({ enabled: event.target.checked })} />
+        </PreferenceRow>
+        <ThresholdSlider label="Brightness" value={imageProcessing.brightness} onChange={(brightness) => setImageProcessing({ enabled: true, brightness })}
+          min={-100} max={100} step={5} unit="" isDark={isDark} />
+        <ThresholdSlider label="Contrast" value={imageProcessing.contrast} onChange={(contrast) => setImageProcessing({ enabled: true, contrast })}
+          min={0.2} max={3} step={0.1} unit="x" dangerAbove={2.5} isDark={isDark} />
+        <ThresholdSlider label="Gamma" value={imageProcessing.gamma} onChange={(gamma) => setImageProcessing({ enabled: true, gamma })}
+          min={0.2} max={3} step={0.1} unit="x" dangerAbove={2.5} isDark={isDark} />
+        <PreferenceRow label="Auto normalize" description="Stretches dark or bright frames before model inference" isDark={isDark}>
+          <input type="checkbox" checked={imageProcessing.autoNormalize} onChange={(event) => setImageProcessing({ enabled: true, autoNormalize: event.target.checked })} />
+        </PreferenceRow>
       </Section>
 
       {/* Alert Thresholds */}
