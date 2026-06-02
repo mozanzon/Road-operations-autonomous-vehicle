@@ -371,6 +371,29 @@ class RobotBridge:
             lng = float(data.get("lng"))
             return [f"GOTO {lat:.6f} {lng:.6f}"]
 
+        if msg_type == "wp_route":
+            points = data.get("points")
+            if not isinstance(points, list) or len(points) == 0:
+                return []
+
+            speed = int(max(0, min(255, int(data.get("maxSpeed", data.get("speed", 160))))))
+            auto_turn_speed = int(max(0, min(255, int(data.get("autoTurnSpeed", 70)))))
+            speed_cap = int(max(0, min(255, int(data.get("speedCap", 102)))))
+            commands = [
+                f"SPEED {speed}",
+                f"AUTO TURN SPEED {auto_turn_speed}",
+                f"SPEED CAP {speed_cap}",
+                f"WP BEGIN {len(points)}",
+            ]
+            for order, point in enumerate(points):
+                if not isinstance(point, dict) or "lat" not in point or "lng" not in point:
+                    return []
+                lat = float(point.get("lat"))
+                lng = float(point.get("lng"))
+                commands.append(f"WP ADD {order} {lat:.6f} {lng:.6f}")
+            commands.append("WP START")
+            return commands
+
         if msg_type == "wp_clear":
             return ["WP CLEAR"]
 
@@ -384,6 +407,12 @@ class RobotBridge:
 
         if msg_type == "wp_start":
             return ["WP START"]
+
+        if msg_type == "wp_pause":
+            return ["WP PAUSE"]
+
+        if msg_type == "wp_resume":
+            return ["WP RESUME"]
 
         if msg_type == "wp_stop":
             return ["WP STOP"]

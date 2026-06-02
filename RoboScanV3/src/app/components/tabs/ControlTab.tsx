@@ -519,9 +519,10 @@ export function ControlTab() {
               </div>
             ))}
           </div>
-          <div className="mt-4 grid grid-cols-3 gap-2">
-            <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={() => robot.startPath({ points: sortedWaypoints.map(({ lat, lng }) => ({ lat, lng })), source: 'direct', maxSpeed: robot.autonomousMaxSpeed })} color="green" disabled={!isConnected || sortedWaypoints.length === 0 || !robot.gps.fix} />
+          <div className="mt-4 grid grid-cols-4 gap-2">
+            <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={() => robot.startPath({ points: (routePositions.length ? routePositions : sortedWaypoints.map(({ lat, lng }) => [lat, lng] as [number, number])).map(([lat, lng]) => ({ lat, lng })), source: routePositions.length ? 'tomtom' : 'direct', maxSpeed: robot.autonomousMaxSpeed })} color="green" disabled={!isConnected || sortedWaypoints.length === 0 || !robot.gps.fix} />
             <ActionButton label="Pause" icon={<Pause className="h-4 w-4" />} onClick={robot.pausePath} color="amber" disabled={robot.pathExecStatus !== 'running'} />
+            <ActionButton label="Resume" icon={<Play className="h-4 w-4" />} onClick={robot.resumePath} color="green" disabled={robot.pathExecStatus !== 'paused'} />
             <ActionButton label="Reset" icon={<RotateCcw className="h-4 w-4" />} onClick={robot.resetPath} color="red" disabled={robot.pathExecStatus === 'idle'} />
           </div>
           <div className={`mt-2 text-center text-xs font-mono ${th.label}`}>STATUS: {robot.pathExecStatus.toUpperCase()}</div>

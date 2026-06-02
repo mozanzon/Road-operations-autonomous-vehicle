@@ -63,5 +63,48 @@ class ArduinoLinkTests(unittest.TestCase):
         self.assertIsNone(link.snapshot()["error"])
 
 
+class RobotBridgeCommandTests(unittest.TestCase):
+    def make_bridge(self):
+        bridge = object.__new__(robot_fast_bridge.RobotBridge)
+        return bridge
+
+    def test_wp_route_batches_speed_route_and_start(self):
+        bridge = self.make_bridge()
+
+        commands = bridge.to_arduino_commands({
+            "type": "wp_route",
+            "maxSpeed": 300,
+            "autoTurnSpeed": 65,
+            "speedCap": -5,
+            "points": [
+                {"lat": 30.0444, "lng": 31.2357},
+                {"lat": 30.0451, "lng": 31.2362},
+            ],
+        })
+
+        self.assertEqual(commands, [
+            "SPEED 255",
+            "AUTO TURN SPEED 65",
+            "SPEED CAP 0",
+            "WP BEGIN 2",
+            "WP ADD 0 30.044400 31.235700",
+            "WP ADD 1 30.045100 31.236200",
+            "WP START",
+        ])
+
+    def test_wp_route_rejects_empty_or_malformed_points(self):
+        bridge = self.make_bridge()
+
+        self.assertEqual(bridge.to_arduino_commands({"type": "wp_route", "points": []}), [])
+        self.assertEqual(bridge.to_arduino_commands({"type": "wp_route", "points": [{"lat": 30.0}]}), [])
+
+    def test_wp_pause_resume_stop_commands(self):
+        bridge = self.make_bridge()
+
+        self.assertEqual(bridge.to_arduino_commands({"type": "wp_pause"}), ["WP PAUSE"])
+        self.assertEqual(bridge.to_arduino_commands({"type": "wp_resume"}), ["WP RESUME"])
+        self.assertEqual(bridge.to_arduino_commands({"type": "wp_stop"}), ["WP STOP"])
+
+
 if __name__ == "__main__":
     unittest.main()

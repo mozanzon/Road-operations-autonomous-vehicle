@@ -183,7 +183,7 @@ export interface RobotContextType {
   updateWaypointHeading: (id: string, heading: number | null) => void;
   importWaypoints: (wps: Waypoint[]) => void;
   pathExecStatus: PathExecStatus;
-  startPath: (route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => void; pausePath: () => void; stopPath: () => void; resetPath: () => void;
+  startPath: (route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => void; pausePath: () => void; resumePath: () => void; stopPath: () => void; resetPath: () => void;
   currentTargetIdx: number;
   scriptedStepIdx: number;
   scriptedMove: ScriptedMove;
@@ -257,7 +257,6 @@ const DEFAULT_ROBOT_SPEED_CAP = 0.4;
 const POTHOME_DUPLICATE_DISTANCE_M = 2;
 const GPS_GLITCH_DISTANCE_M = 1000;
 const GPS_DEFAULT_REJECT_DISTANCE_M = 50;
-const WAYPOINT_COMMAND_INTERVAL_MS = 150;
 const DEFAULT_CAMERA_CALIBRATION: CameraCalibration = {
   heightCm: 35,
   tiltDeg: 35,
@@ -357,7 +356,6 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const lastTelemetryReportAtRef = useRef(0);
   const lastAckMessageRef = useRef('');
   const gpsPausedPlotterRef = useRef(false);
-  const waypointCommandTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
     latestRef.current = { gps, imu, encoders };
@@ -431,22 +429,6 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify(payload ? { type: command, ...payload } : { type: command }));
   }, []);
-
-  const clearQueuedWaypointCommands = useCallback(() => {
-    waypointCommandTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    waypointCommandTimersRef.current = [];
-  }, []);
-
-  const queueWaypointCommands = useCallback((commands: Array<{ command: string; payload?: Record<string, unknown> }>) => {
-    clearQueuedWaypointCommands();
-    commands.forEach(({ command, payload }, index) => {
-      const timer = window.setTimeout(() => {
-        sendCommand(command, payload);
-        waypointCommandTimersRef.current = waypointCommandTimersRef.current.filter((queuedTimer) => queuedTimer !== timer);
-      }, index * WAYPOINT_COMMAND_INTERVAL_MS);
-      waypointCommandTimersRef.current.push(timer);
-    });
-  }, [clearQueuedWaypointCommands, sendCommand]);
 
   const capSpeed = useCallback((speed: number) => clampSpeed(speed, robotSpeedCap), [robotSpeedCap]);
 
@@ -705,9 +687,12 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance', 'plot_distance_m', 'pd', 'plot_target_m', 'pt'], segmentDistance));
     if (hasAny(arduino, ['wp_index'])) setCurrentTargetIdx(numberFrom(arduino, ['wp_index'], currentTargetIdx));
     const waypointCount = numberFrom(arduino, ['wp_count'], 0);
-    if (boolFrom(arduino, ['nav_active', 'wp_active'], false)) {
+    const routeStatus = stringFrom(arduino, ['wp_status', 'route_status'], '').toLowerCase();
+    if (boolFrom(arduino, ['wp_paused'], false) || routeStatus === 'paused') {
+      setPathExecStatus('paused');
+    } else if (boolFrom(arduino, ['nav_active', 'wp_active'], false) || routeStatus === 'running') {
       setPathExecStatus('running');
-    } else if (waypointCount > 0 && pathExecStatus === 'running') {
+    } else if ((routeStatus === 'done' || routeStatus === 'idle' || routeStatus === 'error' || waypointCount > 0) && pathExecStatus === 'running') {
       setPathExecStatus('idle');
     }
     if (activeSessionRef.current && now - lastTelemetryReportAtRef.current >= 1000) {
@@ -855,36 +840,37 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     }
     const cappedMaxSpeed = capSpeed(route?.maxSpeed ?? autonomousMaxSpeed);
     setCurrentTargetIdx(0);
-    queueWaypointCommands([
-      { command: 'speed', payload: { speed: normalizedSpeedToPwm(cappedMaxSpeed) } },
-      { command: 'auto_turn_speed', payload: { speed: normalizedSpeedToPwm(autoTurnSpeed) } },
-      { command: 'speed_cap', payload: { speed: normalizedSpeedToPwm(robotSpeedCap) } },
-      { command: 'wp_clear' },
-      ...routePoints.map((point, order) => ({ command: 'wp_add', payload: { order, lat: point.lat, lng: point.lng } })),
-      { command: 'wp_start' },
-    ]);
+    setPathExecStatus('running');
+    sendCommand('wp_route', {
+      points: routePoints,
+      maxSpeed: normalizedSpeedToPwm(cappedMaxSpeed),
+      autoTurnSpeed: normalizedSpeedToPwm(autoTurnSpeed),
+      speedCap: normalizedSpeedToPwm(robotSpeedCap),
+    });
     appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${cappedMaxSpeed}m/s` });
-  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, queueWaypointCommands, robotSpeedCap, waypoints]);
+  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, robotSpeedCap, sendCommand, waypoints]);
 
   const pausePath = useCallback(() => {
-    clearQueuedWaypointCommands();
     setPathExecStatus('paused');
-    sendCommand('wp_stop');
-  }, [clearQueuedWaypointCommands, sendCommand]);
+    sendCommand('wp_pause');
+  }, [sendCommand]);
+
+  const resumePath = useCallback(() => {
+    setPathExecStatus('running');
+    sendCommand('wp_resume');
+  }, [sendCommand]);
 
   const stopPath = useCallback(() => {
-    clearQueuedWaypointCommands();
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
     sendCommand('wp_stop');
-  }, [clearQueuedWaypointCommands, sendCommand]);
+  }, [sendCommand]);
 
   const resetPath = useCallback(() => {
-    clearQueuedWaypointCommands();
     setPathExecStatus('idle');
     setCurrentTargetIdx(0);
     sendCommand('wp_stop');
-  }, [clearQueuedWaypointCommands, sendCommand]);
+  }, [sendCommand]);
 
   const setScriptedMove = useCallback((move: Partial<ScriptedMove>) => {
     setScriptedMoveState((prev) => ({ ...prev, ...move, speed: move.speed === undefined ? prev.speed : capSpeed(move.speed) }));
@@ -1071,7 +1057,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       crackCount: detections.filter((d) => d.type === 'crack').length,
       detections, addDetection,
       waypoints, addWaypoint, updateWaypoint, deleteWaypoint, clearWaypoints, moveWaypoint, updateWaypointHeading, importWaypoints,
-      pathExecStatus, startPath, pausePath, stopPath, resetPath, currentTargetIdx, scriptedStepIdx,
+      pathExecStatus, startPath, pausePath, resumePath, stopPath, resetPath, currentTargetIdx, scriptedStepIdx,
       scriptedMove: scriptedMoveState, setScriptedMove,
       scriptedMoves, addScriptedMove, removeScriptedMove, moveScriptedMove,
       startScriptedMove, pauseScriptedMove, resetScriptedMove,

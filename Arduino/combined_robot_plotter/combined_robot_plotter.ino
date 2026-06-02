@@ -25,10 +25,12 @@
     ENCODER PID <p> <i> <d>
                        set encoder drift PID gains
     GOTO <lat> <lng>   drive to one GPS waypoint, 2m arrival tolerance
+    WP BEGIN <count>   clear and begin loading a waypoint route
     WP CLEAR           clear waypoint queue
     WP ADD <n> <lat> <lng>
                        add ordered waypoint to queue
-    WP START / STOP    start or stop queued waypoint navigation
+    WP START / PAUSE / RESUME / STOP
+                       control queued waypoint navigation
 
   Plotter commands:
     PLOT CONT          arm continuous plotting while moving
@@ -136,6 +138,16 @@ struct NavWaypoint {
   double lng;
 };
 
+enum WaypointState {
+  WP_STATE_IDLE,
+  WP_STATE_LOADING,
+  WP_STATE_LOADED,
+  WP_STATE_RUNNING,
+  WP_STATE_PAUSED,
+  WP_STATE_DONE,
+  WP_STATE_ERROR
+};
+
 enum PlotterMode {
   PLOTTER_OFF,
   PLOTTER_CONT,
@@ -168,6 +180,9 @@ unsigned long navStartMs = 0;
 NavWaypoint waypointQueue[MAX_WAYPOINTS];
 int waypointCount = 0;
 int waypointIndex = 0;
+int waypointExpectedCount = 0;
+WaypointState waypointState = WP_STATE_IDLE;
+String waypointError = "";
 bool navQueueActive = false;
 bool navDrivingSegment = false;
 bool navHeadingAdjusting = false;
@@ -243,6 +258,20 @@ void printCompassFields(float heading) {
   Serial.print(compassOk ? 1 : 0);
 }
 
+const char* waypointStateName() {
+  switch (waypointState) {
+    case WP_STATE_LOADING: return "loading";
+    case WP_STATE_LOADED: return "loaded";
+    case WP_STATE_RUNNING: return "running";
+    case WP_STATE_PAUSED: return "paused";
+    case WP_STATE_DONE: return "done";
+    case WP_STATE_ERROR: return "error";
+    case WP_STATE_IDLE:
+    default:
+      return "idle";
+  }
+}
+
 void printNavigationFields() {
   Serial.print("|nav_active=");
   Serial.print(navActive ? 1 : 0);
@@ -257,7 +286,16 @@ void printNavigationFields() {
   Serial.print("|target_distance_m=");
   Serial.print(lastTargetDistanceM, 2);
   Serial.print("|wp_active=");
-  Serial.print(navQueueActive ? 1 : 0);
+  Serial.print(waypointState == WP_STATE_RUNNING ? 1 : 0);
+  Serial.print("|wp_paused=");
+  Serial.print(waypointState == WP_STATE_PAUSED ? 1 : 0);
+  Serial.print("|wp_status=");
+  Serial.print(waypointStateName());
+  Serial.print("|wp_expected=");
+  Serial.print(waypointExpectedCount);
+  Serial.print("|wp_error=");
+  if (waypointError.length()) Serial.print(waypointError);
+  else Serial.print("none");
   Serial.print("|wp_count=");
   Serial.print(waypointCount);
   Serial.print("|wp_index=");
@@ -692,6 +730,7 @@ void clearNavigationState(bool arrived) {
   navActive = false;
   navArrived = arrived;
   navQueueActive = false;
+  waypointState = arrived ? WP_STATE_DONE : WP_STATE_IDLE;
   navDrivingSegment = false;
   navHeadingAdjusting = false;
   navTurnActive = false;
@@ -706,12 +745,16 @@ void clearNavigationState(bool arrived) {
 
 void stopNavigation(bool arrived) {
   clearNavigationState(arrived);
+  waypointState = arrived ? WP_STATE_DONE : WP_STATE_IDLE;
   stopDrive();
 }
 
 void clearWaypointQueue() {
   waypointCount = 0;
   waypointIndex = 0;
+  waypointExpectedCount = 0;
+  waypointState = WP_STATE_IDLE;
+  waypointError = "";
   navActive = false;
   navArrived = false;
   navQueueActive = false;
@@ -727,6 +770,35 @@ void clearWaypointQueue() {
   lastTargetBearingDeg = 0.0;
 }
 
+void setWaypointError(const char* message) {
+  waypointState = WP_STATE_ERROR;
+  waypointError = message;
+  navQueueActive = false;
+  navActive = false;
+  stopDrive();
+  Serial.print("ERROR:");
+  Serial.println(message);
+}
+
+void beginWaypointRoute(int expectedCount) {
+  clearWaypointQueue();
+
+  if (expectedCount <= 0) {
+    setWaypointError("WP_route_empty");
+    return;
+  }
+
+  if (expectedCount > MAX_WAYPOINTS) {
+    setWaypointError("WP_route_too_long");
+    return;
+  }
+
+  waypointExpectedCount = expectedCount;
+  waypointState = WP_STATE_LOADING;
+  Serial.print("ACK:WP_BEGIN|expected=");
+  Serial.println(waypointExpectedCount);
+}
+
 void sortWaypointQueue() {
   for (int i = 0; i < waypointCount - 1; i++) {
     for (int j = i + 1; j < waypointCount; j++) {
@@ -740,12 +812,15 @@ void sortWaypointQueue() {
 }
 
 bool addWaypointToQueue(int order, double lat, double lng) {
+  if (waypointState != WP_STATE_LOADING && waypointState != WP_STATE_LOADED) return false;
+  if (waypointExpectedCount > 0 && waypointCount >= waypointExpectedCount) return false;
   if (waypointCount >= MAX_WAYPOINTS) return false;
   waypointQueue[waypointCount].order = order;
   waypointQueue[waypointCount].lat = lat;
   waypointQueue[waypointCount].lng = lng;
   waypointCount++;
   sortWaypointQueue();
+  if (waypointExpectedCount > 0 && waypointCount == waypointExpectedCount) waypointState = WP_STATE_LOADED;
   return true;
 }
 
@@ -800,21 +875,63 @@ void startNavigation(double targetLat, double targetLng) {
 
 void startWaypointQueue() {
   if (waypointCount <= 0) {
-    Serial.println("ERROR:WP_queue_empty");
+    setWaypointError("WP_queue_empty");
+    return;
+  }
+
+  if (waypointExpectedCount > 0 && waypointCount != waypointExpectedCount) {
+    setWaypointError("WP_route_incomplete");
     return;
   }
 
   if (!gpsHasFix()) {
-    Serial.println("ERROR:WP_START_requires_valid_gps_fix");
+    setWaypointError("WP_START_requires_valid_gps_fix");
     return;
   }
 
   gpsOnlyMode = false;
   navQueueActive = true;
   waypointIndex = 0;
+  waypointState = WP_STATE_RUNNING;
+  waypointError = "";
   loadActiveWaypoint();
   Serial.print("ACK:WP_START|count=");
   Serial.println(waypointCount);
+}
+
+void pauseWaypointQueue() {
+  if (waypointState != WP_STATE_RUNNING) {
+    Serial.println("WARN:WP_PAUSE_ignored_not_running");
+    return;
+  }
+
+  stopDrive();
+  navActive = false;
+  navDrivingSegment = false;
+  navHeadingAdjusting = false;
+  navTurnActive = false;
+  waypointState = WP_STATE_PAUSED;
+  Serial.print("ACK:WP_PAUSE|index=");
+  Serial.println(waypointIndex);
+}
+
+void resumeWaypointQueue() {
+  if (waypointState != WP_STATE_PAUSED) {
+    Serial.println("WARN:WP_RESUME_ignored_not_paused");
+    return;
+  }
+
+  if (!gpsHasFix()) {
+    setWaypointError("WP_RESUME_requires_valid_gps_fix");
+    return;
+  }
+
+  waypointState = WP_STATE_RUNNING;
+  navQueueActive = true;
+  waypointError = "";
+  loadActiveWaypoint();
+  Serial.print("ACK:WP_RESUME|index=");
+  Serial.println(waypointIndex);
 }
 
 long expectedTurnTicksForAngle(float angleDeg) {
@@ -909,19 +1026,19 @@ void updateNavigation() {
 
   if (!gpsHasFix()) {
     Serial.println("WARN:NAV_STOPPED_GPS_FIX_LOST");
-    stopNavigation(false);
+    setWaypointError("NAV_STOPPED_GPS_FIX_LOST");
     return;
   }
 
   if (millis() - navStartMs > NAV_TIMEOUT_MS) {
     Serial.println("WARN:NAV_TIMEOUT");
-    stopNavigation(false);
+    setWaypointError("NAV_TIMEOUT");
     return;
   }
 
   if (driveSpeed <= 0) {
     Serial.println("WARN:NAV_STOPPED_ZERO_DRIVE_SPEED");
-    stopNavigation(false);
+    setWaypointError("NAV_STOPPED_ZERO_DRIVE_SPEED");
     return;
   }
 
@@ -1168,9 +1285,10 @@ void printHelp() {
   Serial.println("  MOTOR TRIM <l> <r>      static left/right PWM bias (-50 to 50)");
   Serial.println("  ENCODER PID <p> <i> <d> encoder drift PID gains");
   Serial.println("  GOTO <lat> <lng>        drive to one GPS waypoint, stops within 2m");
+  Serial.println("  WP BEGIN <count>        clear and begin loading a waypoint route");
   Serial.println("  WP CLEAR                clear queued waypoints");
   Serial.println("  WP ADD <n> <lat> <lng>  add ordered waypoint to queue");
-  Serial.println("  WP START / WP STOP      start or stop queued waypoint navigation");
+  Serial.println("  WP START / PAUSE / RESUME / STOP control queued waypoint navigation");
   Serial.println("  PLOT CONT               plotter continuous while moving");
   Serial.println("  PLOT DASH               plotter dashed while moving");
   Serial.println("  PLOT DASH DIST <d> <g>  dashed plot/gap distances in meters");
@@ -1278,6 +1396,8 @@ void handleCommand(String cmd) {
     double targetLat = cmd.substring(valuesStart, separator).toFloat();
     double targetLng = cmd.substring(separator + 1).toFloat();
     startNavigation(targetLat, targetLng);
+  } else if (cmd.startsWith("WP BEGIN ")) {
+    beginWaypointRoute(cmd.substring(9).toInt());
   } else if (cmd == "WP CLEAR") {
     clearWaypointQueue();
     stopDrive();
@@ -1294,7 +1414,7 @@ void handleCommand(String cmd) {
     double targetLat = cmd.substring(firstSeparator + 1, secondSeparator).toFloat();
     double targetLng = cmd.substring(secondSeparator + 1).toFloat();
     if (!addWaypointToQueue(order, targetLat, targetLng)) {
-      Serial.println("ERROR:WP_queue_full");
+      setWaypointError(waypointCount >= MAX_WAYPOINTS ? "WP_queue_full" : "WP_route_not_loading");
       return;
     }
     Serial.print("ACK:WP_ADD|order=");
@@ -1303,6 +1423,10 @@ void handleCommand(String cmd) {
     Serial.println(waypointCount);
   } else if (cmd == "WP START") {
     startWaypointQueue();
+  } else if (cmd == "WP PAUSE") {
+    pauseWaypointQueue();
+  } else if (cmd == "WP RESUME") {
+    resumeWaypointQueue();
   } else if (cmd == "WP STOP") {
     stopNavigation(false);
     Serial.println("ACK:WP_STOP");

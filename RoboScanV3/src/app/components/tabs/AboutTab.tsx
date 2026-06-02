@@ -31,9 +31,9 @@ export function AboutTab() {
   return (
     <div className={`space-y-5 ${pageText}`}>
       <section>
-        <h2 className="font-mono text-lg font-semibold">About RoboScanV3</h2>
+        <h2 className="font-mono text-lg font-semibold">About Autonomous Vehicle for Road Operations</h2>
         <p className={`mt-2 max-w-3xl text-sm leading-6 ${muted}`}>
-          RoboScanV3 combines robot control, telemetry, camera inference, waypoint routing, and road-marking tools in one operator dashboard.
+          Autonomous Vehicle for Road Operations combines robot control, telemetry, camera inference, waypoint routing, and road-marking tools in one operator dashboard.
         </p>
       </section>
 
