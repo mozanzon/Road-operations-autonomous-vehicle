@@ -47,6 +47,10 @@ function bearingBetween([lat1, lng1]: [number, number], [lat2, lng2]: [number, n
   return normalizeHeading(toDegrees(Math.atan2(y, x)));
 }
 
+function isFiniteGpsCoordinate(lat: number, lng: number) {
+  return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+}
+
 function buildHeadingSegments(robotPosition: [number, number], robotHeading: number, sortedWaypoints: { id: string; lat: number; lng: number; headingOverride?: number | null }[]) {
   const pathPositions = sortedWaypoints.map(wp => [wp.lat, wp.lng] as [number, number]);
   const routePoints = [robotPosition, ...pathPositions];
@@ -144,6 +148,7 @@ export function MapTab() {
   };
 
   const tile = tileSources[mapTileSource] || tileSources.osm;
+  const validDetections = detections.filter((det) => isFiniteGpsCoordinate(det.lat, det.lng));
 
   const exportPath = useCallback(() => {
     const data = JSON.stringify({ waypoints, exported: new Date().toISOString() }, null, 2);
@@ -313,7 +318,7 @@ export function MapTab() {
           ))}
 
           {/* Detection pins */}
-          {detections.map(det => (
+          {validDetections.map(det => (
             <CircleMarker
               key={det.id}
               center={[det.lat, det.lng]}

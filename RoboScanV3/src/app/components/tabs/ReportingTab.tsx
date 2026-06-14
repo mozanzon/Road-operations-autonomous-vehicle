@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { BarChart2, Calendar, Download, FileText, TestTube2 } from 'lucide-react';
+import { BarChart2, Calendar, Download, FileText, TestTube2, Trash2 } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useRobot, ReportEvent, ReportSession } from '../../context/RobotContext';
 
 const EGYPT_TIME_ZONE = 'Africa/Cairo';
 
 export function ReportingTab() {
-  const { reportEvents, detections, reportSessions, activeSession } = useRobot();
+  const { reportEvents, detections, reportSessions, activeSession, flushReportData } = useRobot();
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [sessionFilter, setSessionFilter] = useState('all');
@@ -30,19 +30,22 @@ export function ReportingTab() {
   }, [dateFrom, dateTo, reportEvents, selectedSessionIds, sessionFilter]);
 
   const summary = useMemo(() => {
+    const commands = filteredEvents.filter((event) => event.kind === 'command').length;
+    const readings = filteredEvents.filter((event) => event.kind === 'telemetry').length;
+    const sessionEvents = filteredEvents.filter((event) => event.kind === 'session').length;
     const potholes = filteredEvents.filter((event) => event.label === 'pothole').length;
     const cracks = filteredEvents.filter((event) => event.label === 'crack').length;
     const manual = filteredEvents.filter((event) => event.kind === 'manual-reading').length;
-    const telemetry = filteredEvents.filter((event) => event.kind === 'telemetry').length;
     const tests = filteredEvents.filter((event) => event.source === 'test').length;
-    return { potholes, cracks, manual, telemetry, tests };
+    return { commands, readings, sessionEvents, potholes, cracks, manual, tests };
   }, [filteredEvents]);
 
   const chartData = [
+    { name: 'Commands', count: summary.commands },
+    { name: 'Readings', count: summary.readings },
     { name: 'Potholes', count: summary.potholes },
     { name: 'Cracks', count: summary.cracks },
     { name: 'Manual', count: summary.manual },
-    { name: 'Telemetry', count: summary.telemetry },
     { name: 'Test', count: summary.tests },
   ];
 
@@ -58,10 +61,12 @@ export function ReportingTab() {
       `Generated: ${formatEgyptDateTime(Date.now())} Egypt time`,
       `Session scope: ${sessionLabel(sessionFilter, activeSession)}`,
       `Events: ${filteredEvents.length}`,
+      `Commands: ${summary.commands}`,
+      `Readings: ${summary.readings}`,
+      `Session events: ${summary.sessionEvents}`,
       `Potholes: ${summary.potholes}`,
       `Cracks: ${summary.cracks}`,
       `Manual readings: ${summary.manual}`,
-      `Telemetry rows: ${summary.telemetry}`,
       `Test records: ${summary.tests}`,
       '',
       ...filteredEvents.map(formatEvent),
@@ -69,12 +74,21 @@ export function ReportingTab() {
     downloadBlob(lines.join('\n'), `roboscan-${exportScopeName(sessionFilter, activeSession)}-${egyptFilenameStamp(Date.now())}.txt`, 'text/plain');
   };
 
+  const handleFlushRecordings = () => {
+    const confirmed = window.confirm('Flush all saved report recordings, sessions, and detection pins? This cannot be undone.');
+    if (!confirmed) return;
+    flushReportData();
+    setSessionFilter('all');
+    setDateFrom('');
+    setDateTo('');
+  };
+
   return (
     <div className="space-y-5">
       <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-slate-200">
-            <BarChart2 className="h-4 w-4 text-amber-400" /> Real Inspection Report
+            <BarChart2 className="h-4 w-4 text-amber-400" /> Session Recorder
           </h3>
           <div className="flex flex-wrap items-center gap-3">
             <select value={sessionFilter} onChange={(event) => setSessionFilter(event.target.value)} className="rounded border border-slate-600 bg-slate-800 px-2 py-2 text-xs font-mono text-slate-300 focus:border-amber-500 focus:outline-none">
@@ -96,21 +110,29 @@ export function ReportingTab() {
             <button onClick={exportTextReport} className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-300 hover:bg-slate-700">
               <FileText className="h-3.5 w-3.5" /> Report
             </button>
+            <button
+              onClick={handleFlushRecordings}
+              disabled={reportEvents.length === 0 && reportSessions.length === 0 && detections.length === 0 && !activeSession}
+              className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs font-mono text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Flush recordings
+            </button>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <Summary label="Events" value={filteredEvents.length} />
+        <Summary label="Commands" value={summary.commands} color="text-sky-300" />
+        <Summary label="Readings" value={summary.readings} color="text-cyan-400" />
         <Summary label="Potholes" value={summary.potholes} color="text-orange-400" />
         <Summary label="Cracks" value={summary.cracks} color="text-yellow-400" />
         <Summary label="Manual" value={summary.manual} color="text-blue-400" />
-        <Summary label="Telemetry" value={summary.telemetry} color="text-cyan-400" />
         <Summary label="Test" value={summary.tests} color="text-purple-400" />
       </div>
 
       <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-5">
-        <div className="mb-3 text-xs font-mono uppercase tracking-wider text-slate-400">Event Summary</div>
+        <div className="mb-3 text-xs font-mono uppercase tracking-wider text-slate-400">Session Activity Summary</div>
         <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chartData} margin={{ top: 2, right: 4, bottom: 2, left: -20 }}>
@@ -158,13 +180,13 @@ export function ReportingTab() {
         </div>
         {filteredEvents.length === 0 && (
           <div className="py-10 text-center text-xs font-mono text-slate-500">
-            No report events match the selected session and Egypt-time date range.
+            No recorded session activity matches the selected session and Egypt-time date range.
           </div>
         )}
       </div>
 
       <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 text-xs font-mono text-slate-500">
-        Current detection cache: {detections.length} items. Sessions saved: {reportSessions.length}. Active session: {activeSession ? activeSession.id : 'none'}.
+        Recorder status: {activeSession ? `running on ${activeSession.id}` : 'idle'}. Commands and readings are only stored while a session is active. Detection cache: {detections.length}. Sessions saved: {reportSessions.length}.
       </div>
     </div>
   );
@@ -190,15 +212,17 @@ function formatEvent(event: ReportEvent) {
   ].filter(Boolean).join('\n');
 }
 
-function buildWorkbook(events: ReportEvent[], sessions: ReportSession[], summary: { potholes: number; cracks: number; manual: number; telemetry: number; tests: number }) {
+function buildWorkbook(events: ReportEvent[], sessions: ReportSession[], summary: { commands: number; readings: number; sessionEvents: number; potholes: number; cracks: number; manual: number; tests: number }) {
   const overviewRows = [
     ['Metric', 'Value'],
     ['Generated Egypt Time', formatEgyptDateTime(Date.now())],
     ['Events', events.length],
+    ['Commands', summary.commands],
+    ['Readings', summary.readings],
+    ['Session events', summary.sessionEvents],
     ['Potholes', summary.potholes],
     ['Cracks', summary.cracks],
     ['Manual readings', summary.manual],
-    ['Telemetry rows', summary.telemetry],
     ['Test records', summary.tests],
     ['Sessions in export', sessions.length],
     ['GPS fix rows', events.filter((event) => event.gps.fix).length],

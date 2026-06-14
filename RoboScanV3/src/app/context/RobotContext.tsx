@@ -221,6 +221,7 @@ export interface RobotContextType {
   recordManualReading: (label?: string) => void;
   injectTestReport: () => void;
   reportEvents: ReportEvent[];
+  flushReportData: () => void;
   emergencyStop: () => void;
   units: 'metric' | 'imperial';
   setUnits: (u: 'metric' | 'imperial') => void;
@@ -370,22 +371,22 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, [arduinoTelemetry]);
 
   useEffect(() => {
-    localStorage.setItem(REPORT_EVENTS_STORAGE_KEY, JSON.stringify(reportEvents.slice(0, 10000)));
+    writeStorage(REPORT_EVENTS_STORAGE_KEY, reportEvents.slice(0, 10000));
   }, [reportEvents]);
 
   useEffect(() => {
-    localStorage.setItem(REPORT_SESSIONS_STORAGE_KEY, JSON.stringify(reportSessions.slice(0, 100)));
+    writeStorage(REPORT_SESSIONS_STORAGE_KEY, reportSessions.slice(0, 100));
   }, [reportSessions]);
 
   useEffect(() => {
-    localStorage.setItem(PREF_STORAGE_KEY, JSON.stringify({
+    writeStorage(PREF_STORAGE_KEY, {
       robotSpeedCap,
       autoTurnSpeed,
       cameraCalibration,
       compassOffset,
       alignRobotFrontToHeading,
       imageProcessing,
-    } satisfies StoredPreferences));
+    } satisfies StoredPreferences);
   }, [alignRobotFrontToHeading, autoTurnSpeed, cameraCalibration, compassOffset, imageProcessing, robotSpeedCap]);
 
   useEffect(() => {
@@ -397,7 +398,12 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearInterval(timer);
   }, []);
 
-  const appendReportEvent = useCallback((event: Omit<ReportEvent, 'id' | 'timestamp' | 'gps' | 'imu' | 'encoders'> & { timestamp?: number }) => {
+  const appendReportEvent = useCallback((
+    event: Omit<ReportEvent, 'id' | 'timestamp' | 'gps' | 'imu' | 'encoders'> & { timestamp?: number },
+    options?: { sessionId?: string },
+  ) => {
+    const sessionId = options?.sessionId ?? activeSessionRef.current?.id;
+    if (!sessionId) return;
     const timestamp = event.timestamp ?? Date.now();
     const snapshot = latestRef.current;
     const telemetry = latestTelemetryRef.current;
@@ -407,7 +413,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       gps: snapshot.gps,
       imu: snapshot.imu,
       encoders: snapshot.encoders,
-      sessionId: activeSessionRef.current?.id,
+      sessionId,
       arduino: telemetry,
       mode,
       motorMotion: stringFrom(telemetry ?? {}, ['motor_motion', 'motion', 'drive_motion'], inferMotorMotion(telemetry, snapshot.encoders)),
@@ -428,7 +434,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify(payload ? { type: command, ...payload } : { type: command }));
-  }, []);
+    if (activeSessionRef.current) {
+      appendReportEvent({
+        kind: 'command',
+        source: 'robot',
+        label: formatCommandLabel(command),
+        details: payload ? `${command} ${JSON.stringify(payload)}` : command,
+      });
+    }
+  }, [appendReportEvent]);
 
   const capSpeed = useCallback((speed: number) => clampSpeed(speed, robotSpeedCap), [robotSpeedCap]);
 
@@ -847,7 +861,6 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       autoTurnSpeed: normalizedSpeedToPwm(autoTurnSpeed),
       speedCap: normalizedSpeedToPwm(robotSpeedCap),
     });
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started waypoint path', details: `${routePoints.length} route points at max ${cappedMaxSpeed}m/s` });
   }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, robotSpeedCap, sendCommand, waypoints]);
 
   const pausePath = useCallback(() => {
@@ -904,8 +917,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setPathExecStatus('running');
     setScriptedStepIdx(0);
     runScriptedStep(steps.map((step) => ({ ...step, speed: capSpeed(step.speed) })), 0, sendCommand, setScriptedStepIdx, setPathExecStatus, scriptedTimerRef);
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Started scripted path', details: `${steps.length} movement step${steps.length === 1 ? '' : 's'}` });
-  }, [appendReportEvent, capSpeed, scriptedMoveState, scriptedMoves, sendCommand]);
+  }, [capSpeed, scriptedMoveState, scriptedMoves, sendCommand]);
 
   const pauseScriptedMove = useCallback(() => {
     if (scriptedTimerRef.current) window.clearTimeout(scriptedTimerRef.current);
@@ -944,17 +956,23 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const estimatedGps = type === 'pothole'
       ? estimateDetectionGps(snapshot.gps, cameraCalibration, pixelBox)
       : null;
+    const fallbackPosition = isFiniteGpsCoordinate(snapshot.gps.lat, snapshot.gps.lng)
+      ? { lat: snapshot.gps.lat, lng: snapshot.gps.lng }
+      : { lat: DEFAULT_GPS.lat, lng: DEFAULT_GPS.lng };
+    const detectionPosition = estimatedGps && isFiniteGpsCoordinate(estimatedGps.lat, estimatedGps.lng)
+      ? estimatedGps
+      : fallbackPosition;
     const detection: Detection = {
       id: `det-${Date.now()}`,
       type,
-      lat: estimatedGps?.lat ?? snapshot.gps.lat,
-      lng: estimatedGps?.lng ?? snapshot.gps.lng,
+      lat: detectionPosition.lat,
+      lng: detectionPosition.lng,
       confidence,
       timestamp: Date.now(),
       source,
       count: 1,
       lastSeenAt: Date.now(),
-      mapped: Boolean(estimatedGps),
+      mapped: Boolean(estimatedGps && isFiniteGpsCoordinate(estimatedGps.lat, estimatedGps.lng)),
     };
     setDetections((prev) => {
       if (type === 'pothole' && estimatedGps) {
@@ -987,10 +1005,10 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const startSession = useCallback(() => {
     if (activeSessionRef.current) return;
     const session: ReportSession = { id: `session-${Date.now()}`, startedAt: Date.now(), mode };
+    lastTelemetryReportAtRef.current = 0;
     setActiveSession(session);
     setReportSessions((prev) => [session, ...prev].slice(0, 100));
-    appendReportEvent({ kind: 'session', source: 'robot', label: 'Session started', details: `Started ${mode} session`, sessionId: session.id });
-  }, [appendReportEvent, mode]);
+  }, [mode]);
 
   const stopSession = useCallback(() => {
     const session = activeSessionRef.current;
@@ -998,8 +1016,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const endedAt = Date.now();
     setActiveSession(null);
     setReportSessions((prev) => prev.map((item) => item.id === session.id ? { ...item, endedAt } : item));
-    appendReportEvent({ kind: 'session', source: 'robot', label: 'Session stopped', details: `Stopped session after ${Math.round((endedAt - session.startedAt) / 1000)}s`, sessionId: session.id });
-  }, [appendReportEvent]);
+  }, []);
 
   const injectTestReport = useCallback(() => {
     const type = detections.length % 2 === 0 ? 'pothole' : 'crack';
@@ -1007,13 +1024,21 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     appendReportEvent({ kind: 'test', source: 'test', label: 'Test application record', confidence: 0.88, details: 'Synthetic test event generated from Operations tab' });
   }, [addDetection, appendReportEvent, detections.length]);
 
+  const flushReportData = useCallback(() => {
+    setActiveSession(null);
+    setReportEvents([]);
+    setReportSessions([]);
+    setDetections([]);
+    removeStorage(REPORT_EVENTS_STORAGE_KEY);
+    removeStorage(REPORT_SESSIONS_STORAGE_KEY);
+  }, []);
+
   const emergencyStop = useCallback(() => {
     sendVelocity(0, 0);
     setPathExecStatus('idle');
     setPaintingState((prev) => ({ ...prev, active: false, status: 'idle' }));
     sendCommand('stop');
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Emergency stop' });
-  }, [appendReportEvent, sendCommand, sendVelocity]);
+  }, [sendCommand, sendVelocity]);
 
   const setSelectedModelPath = useCallback((value: string) => {
     setSelectedModelPathState(value);
@@ -1028,14 +1053,12 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const sendMotorTrim = useCallback((left: number, right: number) => {
     sendCommand('motor_trim', { left, right });
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Motor trim applied', details: `left=${left}, right=${right}` });
-  }, [appendReportEvent, sendCommand]);
+  }, [sendCommand]);
 
   const sendEncoderPid = useCallback((pid: PIDSet) => {
     setPidLinear(pid);
     sendCommand('encoder_pid', pid);
-    appendReportEvent({ kind: 'command', source: 'robot', label: 'Encoder PID applied', details: `kp=${pid.kp}, ki=${pid.ki}, kd=${pid.kd}` });
-  }, [appendReportEvent, sendCommand]);
+  }, [sendCommand]);
 
   const stopWaypointQueue = useCallback(() => {
     setPathExecStatus('idle');
@@ -1071,7 +1094,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       sendMotorTrim, sendEncoderPid, stopWaypointQueue,
       joystickOutput, setJoystickOutput: sendVelocity, sendVelocity, sendCommand,
       startSession, stopSession, activeSession, reportSessions,
-      recordManualReading, injectTestReport, reportEvents,
+      recordManualReading, injectTestReport, reportEvents, flushReportData,
       emergencyStop,
       units, setUnits, gpsThreshold, setGpsThreshold,
       encoderErrorLimit, setEncoderErrorLimit, batteryWarning, setBatteryWarning,
@@ -1107,6 +1130,34 @@ function parseCompactValue(value: string): number | string {
   const trimmed = value.trim();
   const numeric = Number(trimmed);
   return trimmed !== '' && Number.isFinite(numeric) ? numeric : trimmed;
+}
+
+function writeStorage(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.warn(`Failed to persist ${key}`, error);
+  }
+}
+
+function removeStorage(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    console.warn(`Failed to remove ${key}`, error);
+  }
+}
+
+function formatCommandLabel(command: string) {
+  return command
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function isFiniteGpsCoordinate(lat: number, lng: number) {
+  return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
 }
 
 function normalizedSpeedToPwm(speed: number): number {
