@@ -8,7 +8,6 @@ Autonomous Vehicle for Road Operations is a multi-part robotics project for fiel
 - `pi_fast_bridge/`: Python bridge for Raspberry Pi communication between the dashboard and robot hardware
 - `Arduino/combined_robot_plotter/`: Arduino firmware for the road-operation robot controller
 - `model/`: trained model artifacts such as `best.pt` and `best.onnx`
-- `tests/`: Python tests for the bridge layer
 
 ## Main Features
 
@@ -32,10 +31,6 @@ Autonomous Vehicle for Road Operations is a multi-part robotics project for fiel
 1. Open `pi_fast_bridge/`.
 2. Install dependencies with `pip install -r requirements.txt`.
 3. Run the bridge with Python using `robot_fast_bridge.py`.
-
-### Tests
-
-- Run the Python tests from the repository root with `pytest`.
 
 ## Notes
 
