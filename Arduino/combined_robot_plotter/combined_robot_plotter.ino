@@ -81,8 +81,8 @@ const float TICKS_PER_REV = 2400.0;
 const float ENCODER_PPR = 600.0;
 const float QUADRATURE_EDGES_PER_PULSE = 4.0;
 
-// Wheel diameter is 32 cm and wheelbase/track width is about 60 cm.
-const float ROBOT_TRACK_WIDTH_M = 0.60;
+// Wheel diameter is 32 cm and wheelbase/track width is about 50 cm.
+const float ROBOT_TRACK_WIDTH_M = 0.50;
 
 const float TURN_ANGLE_DEG = 90.0;
 const float HEADING_TOLERANCE_DEG = 2.5;

@@ -228,7 +228,7 @@ export function PreferencesTab() {
 
       {/* Model Settings */}
       <Section title="Detection Model" icon={<BrainCircuit className="h-4 w-4 text-amber-400" />} isDark={isDark}>
-        <PreferenceRow label="Selected Model Path" description="Stored display path for the ONNX road damage model" isDark={isDark}>
+        <PreferenceRow label="Selected Model Path" description="Display name for the ONNX road damage model saved in this browser" isDark={isDark}>
           <input
             type="text"
             value={selectedModelPath}
@@ -238,7 +238,7 @@ export function PreferencesTab() {
           />
         </PreferenceRow>
         <div className={`text-xs font-mono rounded p-3 border ${infoBox}`}>
-          Browser security still requires loading the actual ONNX file from the Operations camera panel when running local inference.
+          Load a model once from the Operations camera panel and the UI will restore it automatically in this browser profile.
         </div>
       </Section>
 

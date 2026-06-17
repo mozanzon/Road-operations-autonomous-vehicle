@@ -153,6 +153,7 @@ export interface RobotContextType {
   setConnectionIp: (ip: string) => void;
   connect: () => void;
   disconnect: () => void;
+  connectionMessage: string;
   hostname: string; uptime: number; battery: number; latency: number;
   bridgeStats: BridgeStats | null;
   arduinoTelemetry: Record<string, unknown> | null;
@@ -291,6 +292,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const storedPreferences = useMemo(readStoredPreferences, []);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [connectionIp, setConnectionIp] = useState('192.168.1.100');
+  const [connectionMessage, setConnectionMessage] = useState('Enter the Raspberry Pi IP address and connect.');
   const [hostname, setHostname] = useState('raspberrypi');
   const [uptime, setUptime] = useState(0);
   const [battery, setBattery] = useState(0);
@@ -349,6 +351,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const socketRef = useRef<WebSocket | null>(null);
   const connectedAtRef = useRef<number | null>(null);
   const lastMessageAtRef = useRef<number | null>(null);
+  const receivedBridgeMessageRef = useRef(false);
+  const manualDisconnectRef = useRef(false);
   const latestRef = useRef({ gps: DEFAULT_GPS, imu: DEFAULT_IMU, encoders: DEFAULT_ENCODERS });
   const lastManualMotionRef = useRef('');
   const scriptedTimerRef = useRef<number | null>(null);
@@ -582,13 +586,16 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, [capSpeed, robotSpeedCap, sendCommand]);
 
   const disconnect = useCallback(() => {
+    manualDisconnectRef.current = true;
     if (socketRef.current) {
       socketRef.current.close();
       socketRef.current = null;
     }
     connectedAtRef.current = null;
     lastMessageAtRef.current = null;
+    receivedBridgeMessageRef.current = false;
     setConnectionStatus('disconnected');
+    setConnectionMessage('Disconnected by operator.');
     setCameraLive(false);
     setCameraFrame('');
     setBridgeStats(null);
@@ -722,11 +729,21 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, [appendReportEvent, battery, compassOffset, currentTargetIdx, hostname, painting.active, painting.dashLength, painting.gapLength, painting.mode, pathExecStatus, segmentDistance, sendCommand, totalDistance]);
 
   const connect = useCallback(() => {
-    const host = connectionIp.trim();
+    const host = normalizeBridgeHost(connectionIp);
     if (!host || connectionStatus === 'attempting') return;
     disconnect();
+    manualDisconnectRef.current = false;
+    receivedBridgeMessageRef.current = false;
     setConnectionStatus('attempting');
-    const socket = new WebSocket(`ws://${host}:${BRIDGE_PORT}`);
+    setConnectionMessage(`Connecting to ws://${host}:${BRIDGE_PORT}...`);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(`ws://${host}:${BRIDGE_PORT}`);
+    } catch (error) {
+      setConnectionStatus('disconnected');
+      setConnectionMessage(error instanceof Error ? `Invalid bridge address: ${error.message}` : 'Invalid bridge address.');
+      return;
+    }
     socketRef.current = socket;
 
     socket.onopen = () => {
@@ -734,10 +751,13 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       lastMessageAtRef.current = Date.now();
       setConnectionStatus('connected');
       setHostname(host);
+      setConnectionMessage('Socket opened. Waiting for bridge telemetry...');
       socket.send(JSON.stringify({ type: 'compass_offset', degrees: compassOffset }));
     };
     socket.onmessage = (event) => {
       lastMessageAtRef.current = Date.now();
+      receivedBridgeMessageRef.current = true;
+      setConnectionMessage('Bridge telemetry active.');
       const payload = parseBridgePayload(event.data);
       if (!payload) return;
       if (payload.stats) {
@@ -779,12 +799,24 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     };
     socket.onerror = () => {
       setConnectionStatus('disconnected');
+      setConnectionMessage(`WebSocket error while connecting to ${host}:${BRIDGE_PORT}. Check the Pi IP, port 8765, and bridge process.`);
       setCameraLive(false);
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (socketRef.current === socket) {
         socketRef.current = null;
         setConnectionStatus('disconnected');
+        const lifetimeMs = connectedAtRef.current ? Date.now() - connectedAtRef.current : 0;
+        const detail = event.reason ? `${event.code} ${event.reason}` : String(event.code);
+        const telemetryState = receivedBridgeMessageRef.current ? 'after receiving telemetry' : 'before any telemetry arrived';
+        setConnectionMessage(
+          manualDisconnectRef.current
+            ? 'Disconnected by operator.'
+            : `Bridge socket closed ${telemetryState} (${detail}) after ${(lifetimeMs / 1000).toFixed(1)}s.`,
+        );
+        connectedAtRef.current = null;
+        lastMessageAtRef.current = null;
+        receivedBridgeMessageRef.current = false;
         setCameraLive(false);
       }
     };
@@ -1070,7 +1102,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <RobotContext.Provider value={{
-      connectionStatus, connectionIp, setConnectionIp, connect, disconnect,
+      connectionStatus, connectionIp, setConnectionIp, connect, disconnect, connectionMessage,
       hostname, uptime, battery, latency, bridgeStats, arduinoTelemetry, cameraFrame, cameraLive, testingMode, setTestingMode, modelStatus,
       selectedModelPath: selectedModelPathState, setSelectedModelPath, setModelStatus,
       tomTomApiKey: tomTomApiKeyState, setTomTomApiKey,
@@ -1112,6 +1144,13 @@ function parseBridgePayload(data: unknown): BridgePayload | null {
   } catch {
     return null;
   }
+}
+
+function normalizeBridgeHost(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  const withoutProtocol = trimmed.replace(/^wss?:\/\//i, '').replace(/^https?:\/\//i, '');
+  return withoutProtocol.replace(new RegExp(`:${BRIDGE_PORT}$`), '').replace(/\/+$/, '');
 }
 
 function parseCompactArduinoStatus(raw: unknown): Record<string, unknown> | null {

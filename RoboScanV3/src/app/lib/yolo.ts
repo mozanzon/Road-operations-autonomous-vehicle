@@ -18,6 +18,17 @@ export type Detection = {
   };
 };
 
+export type DetectionStats = {
+  outputShape: number[];
+  confidenceThreshold: number;
+  candidateCount: number;
+  aboveThresholdCount: number;
+  topScore: number;
+  topClassId: number;
+  topLabel: string;
+  detectionCount: number;
+};
+
 export type ModelInfo = {
   inputName: string;
   inputWidth: number;
@@ -92,6 +103,26 @@ export async function detectYolo({
   confidenceThreshold,
   iouThreshold,
 }: DetectOptions): Promise<Detection[]> {
+  const result = await detectYoloDetailed({
+    session,
+    modelInfo,
+    source,
+    labels,
+    confidenceThreshold,
+    iouThreshold,
+  });
+
+  return result.detections;
+}
+
+export async function detectYoloDetailed({
+  session,
+  modelInfo,
+  source,
+  labels = [],
+  confidenceThreshold,
+  iouThreshold,
+}: DetectOptions): Promise<{ detections: Detection[]; stats: DetectionStats }> {
   const { tensor, letterbox } = preprocess(source, modelInfo.inputWidth, modelInfo.inputHeight);
   const feeds: Record<string, ort.Tensor> = {
     [modelInfo.inputName]: tensor,
@@ -104,9 +135,17 @@ export async function detectYolo({
   }
 
   const output = results[outputName];
+  const stats = outputToStats(output, labels, confidenceThreshold);
   const detections = outputToDetections(output, labels, letterbox, confidenceThreshold);
+  const selected = nonMaxSuppression(detections, iouThreshold);
 
-  return nonMaxSuppression(detections, iouThreshold);
+  return {
+    detections: selected,
+    stats: {
+      ...stats,
+      detectionCount: selected.length,
+    },
+  };
 }
 
 export function drawDetections(
@@ -260,6 +299,14 @@ function outputToDetections(
   const first = dims[1];
   const second = dims[2];
 
+  if (second >= 6 && first > second && looksLikeNmsOutput(values, first, second)) {
+    return nmsRowMajorOutputToDetections(values, first, second, labels, letterbox, confidenceThreshold);
+  }
+
+  if (first >= 6 && second > first && looksLikeNmsOutput(values, second, first, true)) {
+    return nmsColumnMajorOutputToDetections(values, first, second, labels, letterbox, confidenceThreshold);
+  }
+
   if (second >= 5 && first > second) {
     return rowMajorOutputToDetections(values, first, second, labels, letterbox, confidenceThreshold);
   }
@@ -270,6 +317,90 @@ function outputToDetections(
 
   const features = Math.max(5, labels.length + 5);
   return rowMajorOutputToDetections(values, Math.floor(values.length / features), features, labels, letterbox, confidenceThreshold);
+}
+
+function outputToStats(
+  output: ort.Tensor,
+  labels: string[],
+  confidenceThreshold: number,
+): DetectionStats {
+  const dims = output.dims;
+  const values = output.data as Float32Array | number[];
+  const stats: DetectionStats = {
+    outputShape: [...dims],
+    confidenceThreshold,
+    candidateCount: 0,
+    aboveThresholdCount: 0,
+    topScore: 0,
+    topClassId: -1,
+    topLabel: "No candidate",
+    detectionCount: 0,
+  };
+
+  if (dims.length !== 3) {
+    return stats;
+  }
+
+  const first = dims[1];
+  const second = dims[2];
+  const record = (prediction: { classId: number; score: number }) => {
+    if (prediction.classId < 0) {
+      return;
+    }
+
+    stats.candidateCount += 1;
+    if (prediction.score >= confidenceThreshold) {
+      stats.aboveThresholdCount += 1;
+    }
+    if (prediction.score > stats.topScore) {
+      stats.topScore = prediction.score;
+      stats.topClassId = prediction.classId;
+      stats.topLabel = labels[prediction.classId] ?? `Class ${prediction.classId}`;
+    }
+  };
+
+  if (second >= 6 && first > second && looksLikeNmsOutput(values, first, second)) {
+    for (let row = 0; row < first; row += 1) {
+      const offset = row * second;
+      record({
+        classId: Math.max(0, Math.round(values[offset + 5] ?? 0)),
+        score: normalizeScore(values[offset + 4]),
+      });
+    }
+    return stats;
+  }
+
+  if (first >= 6 && second > first && looksLikeNmsOutput(values, second, first, true)) {
+    for (let row = 0; row < second; row += 1) {
+      record({
+        classId: Math.max(0, Math.round(values[second * 5 + row] ?? 0)),
+        score: normalizeScore(values[second * 4 + row]),
+      });
+    }
+    return stats;
+  }
+
+  if (second >= 5 && first > second) {
+    for (let row = 0; row < first; row += 1) {
+      record(bestPrediction(values, row * second, second, labels.length));
+    }
+    return stats;
+  }
+
+  if (first >= 5 && second > first) {
+    for (let row = 0; row < second; row += 1) {
+      record(bestColumnPrediction(values, row, second, first, labels.length));
+    }
+    return stats;
+  }
+
+  const features = Math.max(5, labels.length + 5);
+  const rowCount = Math.floor(values.length / features);
+  for (let row = 0; row < rowCount; row += 1) {
+    record(bestPrediction(values, row * features, features, labels.length));
+  }
+
+  return stats;
 }
 
 function rowMajorOutputToDetections(
@@ -358,6 +489,85 @@ function columnMajorOutputToDetections(
   return limitCandidates(detections);
 }
 
+function nmsRowMajorOutputToDetections(
+  values: Float32Array | number[],
+  rowCount: number,
+  featureCount: number,
+  labels: string[],
+  letterbox: Letterbox,
+  confidenceThreshold: number,
+): Detection[] {
+  const detections: Detection[] = [];
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const offset = row * featureCount;
+    const score = normalizeScore(values[offset + 4]);
+    const classId = Math.max(0, Math.round(values[offset + 5] ?? 0));
+
+    if (score < confidenceThreshold) {
+      continue;
+    }
+
+    const x1 = (values[offset] - letterbox.padX) / letterbox.scale;
+    const y1 = (values[offset + 1] - letterbox.padY) / letterbox.scale;
+    const x2 = (values[offset + 2] - letterbox.padX) / letterbox.scale;
+    const y2 = (values[offset + 3] - letterbox.padY) / letterbox.scale;
+
+    detections.push({
+      classId,
+      label: labels[classId] ?? `Class ${classId}`,
+      score,
+      box: {
+        x: clamp(Math.min(x1, x2), 0, letterbox.sourceWidth),
+        y: clamp(Math.min(y1, y2), 0, letterbox.sourceHeight),
+        width: clamp(Math.abs(x2 - x1), 0, letterbox.sourceWidth),
+        height: clamp(Math.abs(y2 - y1), 0, letterbox.sourceHeight),
+      },
+    });
+  }
+
+  return limitCandidates(detections);
+}
+
+function nmsColumnMajorOutputToDetections(
+  values: Float32Array | number[],
+  featureCount: number,
+  rowCount: number,
+  labels: string[],
+  letterbox: Letterbox,
+  confidenceThreshold: number,
+): Detection[] {
+  const detections: Detection[] = [];
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const score = normalizeScore(values[rowCount * 4 + row]);
+    const classId = Math.max(0, Math.round(values[rowCount * 5 + row] ?? 0));
+
+    if (score < confidenceThreshold) {
+      continue;
+    }
+
+    const x1 = (values[row] - letterbox.padX) / letterbox.scale;
+    const y1 = (values[rowCount + row] - letterbox.padY) / letterbox.scale;
+    const x2 = (values[rowCount * 2 + row] - letterbox.padX) / letterbox.scale;
+    const y2 = (values[rowCount * 3 + row] - letterbox.padY) / letterbox.scale;
+
+    detections.push({
+      classId,
+      label: labels[classId] ?? `Class ${classId}`,
+      score,
+      box: {
+        x: clamp(Math.min(x1, x2), 0, letterbox.sourceWidth),
+        y: clamp(Math.min(y1, y2), 0, letterbox.sourceHeight),
+        width: clamp(Math.abs(x2 - x1), 0, letterbox.sourceWidth),
+        height: clamp(Math.abs(y2 - y1), 0, letterbox.sourceHeight),
+      },
+    });
+  }
+
+  return limitCandidates(detections);
+}
+
 function bestPrediction(
   values: Float32Array | number[],
   offset: number,
@@ -366,7 +576,7 @@ function bestPrediction(
 ): { classId: number; score: number } {
   if (labelCount > 0) {
     const hasObjectness = featureCount >= labelCount + 5;
-    const objectness = hasObjectness ? values[offset + 4] : 1;
+    const objectness = hasObjectness ? normalizeScore(values[offset + 4]) : 1;
     const classOffset = offset + (hasObjectness ? 5 : 4);
     const best = bestClass(values, classOffset, labelCount);
 
@@ -378,7 +588,7 @@ function bestPrediction(
 
   const withoutObjectness = bestClass(values, offset + 4, featureCount - 4);
   const withObjectness = bestClass(values, offset + 5, featureCount - 5);
-  const withObjectnessScore = values[offset + 4] * withObjectness.score;
+  const withObjectnessScore = normalizeScore(values[offset + 4]) * withObjectness.score;
 
   if (withObjectness.classId >= 0 && withObjectnessScore > withoutObjectness.score) {
     return {
@@ -399,7 +609,7 @@ function bestColumnPrediction(
 ): { classId: number; score: number } {
   if (labelCount > 0) {
     const hasObjectness = featureCount >= labelCount + 5;
-    const objectness = hasObjectness ? values[rowCount * 4 + row] : 1;
+    const objectness = hasObjectness ? normalizeScore(values[rowCount * 4 + row]) : 1;
     const classStart = hasObjectness ? 5 : 4;
     const best = bestColumnClass(values, row, rowCount, classStart, labelCount);
 
@@ -411,7 +621,7 @@ function bestColumnPrediction(
 
   const withoutObjectness = bestColumnClass(values, row, rowCount, 4, featureCount - 4);
   const withObjectness = bestColumnClass(values, row, rowCount, 5, featureCount - 5);
-  const withObjectnessScore = values[rowCount * 4 + row] * withObjectness.score;
+  const withObjectnessScore = normalizeScore(values[rowCount * 4 + row]) * withObjectness.score;
 
   if (withObjectness.classId >= 0 && withObjectnessScore > withoutObjectness.score) {
     return {
@@ -457,7 +667,7 @@ function bestClass(values: Float32Array | number[], offset: number, count: numbe
   let score = 0;
 
   for (let index = 0; index < count; index += 1) {
-    const candidate = values[offset + index];
+    const candidate = normalizeScore(values[offset + index]);
     if (candidate > score) {
       classId = index;
       score = candidate;
@@ -478,7 +688,7 @@ function bestColumnClass(
   let score = 0;
 
   for (let index = 0; index < count; index += 1) {
-    const candidate = values[rowCount * (featureStart + index) + row];
+    const candidate = normalizeScore(values[rowCount * (featureStart + index) + row]);
     if (candidate > score) {
       classId = index;
       score = candidate;
@@ -494,6 +704,59 @@ function limitCandidates(detections: Detection[]): Detection[] {
   }
 
   return detections.sort((a, b) => b.score - a.score).slice(0, MAX_NMS_CANDIDATES);
+}
+
+function looksLikeNmsOutput(
+  values: Float32Array | number[],
+  rowCount: number,
+  featureCount: number,
+  columnMajor = false,
+): boolean {
+  if (featureCount < 6 || featureCount > 7) {
+    return false;
+  }
+
+  const sampleCount = Math.min(rowCount, 24);
+  let integerLikeClasses = 0;
+  let cornerLikeBoxes = 0;
+
+  for (let row = 0; row < sampleCount; row += 1) {
+    const x1 = columnMajor ? values[row] : values[row * featureCount];
+    const y1 = columnMajor ? values[rowCount + row] : values[row * featureCount + 1];
+    const x2 = columnMajor ? values[rowCount * 2 + row] : values[row * featureCount + 2];
+    const y2 = columnMajor ? values[rowCount * 3 + row] : values[row * featureCount + 3];
+    const classValue = columnMajor ? values[rowCount * 5 + row] : values[row * featureCount + 5];
+
+    if (Number.isFinite(classValue) && Math.abs(classValue - Math.round(classValue)) < 0.001 && classValue >= 0) {
+      integerLikeClasses += 1;
+    }
+
+    if (Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(x2) && Number.isFinite(y2) && x2 > x1 && y2 > y1) {
+      cornerLikeBoxes += 1;
+    }
+  }
+
+  return integerLikeClasses >= Math.ceil(sampleCount * 0.75) && cornerLikeBoxes >= Math.ceil(sampleCount * 0.6);
+}
+
+function normalizeScore(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  if (value >= 0 && value <= 1) {
+    return value;
+  }
+
+  if (value <= -20) {
+    return 0;
+  }
+
+  if (value >= 20) {
+    return 1;
+  }
+
+  return 1 / (1 + Math.exp(-value));
 }
 
 function getPreprocessCanvas(width: number, height: number): PreprocessCanvas {

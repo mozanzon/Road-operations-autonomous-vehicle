@@ -13,7 +13,7 @@ function formatUptime(seconds: number) {
 export function ConnectionTab() {
   const {
     connectionStatus, connectionIp, setConnectionIp,
-    connect, disconnect, hostname, uptime, battery, latency,
+    connect, disconnect, connectionMessage, hostname, uptime, battery, latency,
   } = useRobot();
   const { isDark } = useTheme();
 
@@ -86,6 +86,9 @@ export function ConnectionTab() {
         </div>
         <p className={`text-xs font-mono ${hint}`}>
           Connects to the Raspberry Pi bridge via WebSocket on port 8765. Ensure the robot is on the same local network.
+        </p>
+        <p className={`rounded-lg border px-3 py-2 text-xs font-mono ${connectionStatus === 'disconnected' ? 'border-red-500/30 bg-red-500/10 text-red-300' : connectionStatus === 'attempting' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-300'}`}>
+          {connectionMessage}
         </p>
       </div>
 

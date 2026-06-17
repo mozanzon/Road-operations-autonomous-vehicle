@@ -4,10 +4,10 @@ import 'leaflet/dist/leaflet.css';
 import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, Bot, Camera, CircleDot, ClipboardList, Gauge, MapPinned, Maximize2,
-  Navigation, Paintbrush, Pause, Play, Plus, RadioTower, RotateCcw, Route, Save, SlidersHorizontal,
+  Navigation, Paintbrush, Pause, Play, Plus, RadioTower, RotateCcw, Route, Save,
   Square, TestTube2, Trash2, Video, VideoOff, X,
 } from 'lucide-react';
-import { Detection, drawDetectionOverlay } from '../../lib/yolo';
+import { Detection, DetectionStats, drawDetectionOverlay } from '../../lib/yolo';
 import { useRobot, RobotMode } from '../../context/RobotContext';
 import { useTheme } from '../../context/ThemeContext';
 import { DPad } from '../DPad';
@@ -16,14 +16,23 @@ delete (L.Icon.Default.prototype as any)._getIconUrl;
 
 type WorkerResponse =
   | { type: 'model-ready'; modelInfo: unknown }
-  | { type: 'detections'; requestId: number; detections: Detection[] }
+  | { type: 'detections'; requestId: number; detections: Detection[]; stats: DetectionStats }
   | { type: 'error'; message: string };
+
+type StoredModelRecord = {
+  name: string;
+  blob: Blob;
+  savedAt: number;
+};
 
 const STREAM_INFERENCE_INTERVAL_MS = 180;
 const EGYPT_CENTER: [number, number] = [30.0444, 31.2357];
 const SOURCE_CAPTURE_WIDTH = 640;
 const MAX_MAP_ZOOM = 22;
 const MAX_NATIVE_TILE_ZOOM = 19;
+const MODEL_DB_NAME = 'roboscan-model-db';
+const MODEL_STORE_NAME = 'models';
+const MODEL_STORE_KEY = 'selected-model';
 
 type HeadingSegment = {
   waypointId: string;
@@ -104,9 +113,6 @@ export function ControlTab() {
   const [modelMessage, setModelMessage] = useState('No ONNX model loaded');
   const [routingStatus, setRoutingStatus] = useState('Straight waypoint line');
   const [routePositions, setRoutePositions] = useState<[number, number][]>([]);
-  const [motorTrimLeft, setMotorTrimLeft] = useState(0);
-  const [motorTrimRight, setMotorTrimRight] = useState(0);
-  const [encoderPidOpen, setEncoderPidOpen] = useState(true);
 
   const imageRef = useRef<HTMLImageElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -124,6 +130,7 @@ export function ControlTab() {
   const loopRef = useRef<number>();
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const restoreAttemptedRef = useRef(false);
 
   const isConnected = robot.connectionStatus === 'connected';
   const sortedWaypoints = useMemo(() => [...robot.waypoints].sort((a, b) => a.order - b.order), [robot.waypoints]);
@@ -167,8 +174,10 @@ export function ControlTab() {
       const message = event.data;
       if (message.type === 'model-ready') {
         setModelLoaded(true);
-        robot.setModelStatus('ready');
-        setModelMessage('Model ready');
+        const hasSource = robot.testingMode || Boolean(robot.cameraFrame);
+        setProcessingLive(hasSource);
+        robot.setModelStatus(hasSource ? 'running' : 'ready');
+        setModelMessage(hasSource ? 'Model connected. Detection started automatically.' : 'Model ready. Waiting for camera input.');
         return;
       }
       if (message.type === 'detections') {
@@ -176,6 +185,7 @@ export function ControlTab() {
           const targetCanvas = cameraExpanded ? modalCanvasRef.current : canvasRef.current;
           const targetSource = currentSourceElement();
           if (targetCanvas && targetSource) drawDetectionOverlay(targetCanvas, targetSource, message.detections);
+          setModelMessage(formatDetectionMessage(message.stats));
           message.detections.forEach((det) => {
             if (det.classId === 0 || det.classId === 1) {
               robot.addDetection(det.classId === 0 ? 'pothole' : 'crack', det.score, robot.testingMode ? 'test' : 'model', {
@@ -200,6 +210,40 @@ export function ControlTab() {
       if (loopRef.current) window.clearTimeout(loopRef.current);
     };
   }, [cameraExpanded, currentSourceElement, robot.addDetection, robot.testingMode, stopProcessing]);
+
+  useEffect(() => {
+    if (!workerRef.current || restoreAttemptedRef.current) return;
+    restoreAttemptedRef.current = true;
+    let cancelled = false;
+
+    const restoreModel = async () => {
+      setModelMessage('Restoring saved model...');
+      try {
+        const storedModel = await readStoredModel();
+        if (!storedModel) {
+          setModelMessage('No saved ONNX model. Load one once to enable auto restore.');
+          return;
+        }
+        if (cancelled || !workerRef.current) return;
+        const modelFile = new File([storedModel.blob], storedModel.name, { type: storedModel.blob.type || 'application/octet-stream' });
+        robot.setSelectedModelPath(storedModel.name);
+        robot.setModelStatus('loading');
+        setModelLoaded(false);
+        setModelMessage(`Restoring ${storedModel.name}...`);
+        workerRef.current.postMessage({ type: 'load-model', modelFile });
+      } catch (error) {
+        if (cancelled) return;
+        robot.setModelStatus('error');
+        setModelLoaded(false);
+        setModelMessage(error instanceof Error ? `Model restore failed: ${error.message}` : 'Model restore failed.');
+      }
+    };
+
+    void restoreModel();
+    return () => {
+      cancelled = true;
+    };
+  }, [robot]);
 
   useEffect(() => {
     if (robot.testingMode || !robot.cameraFrame) return;
@@ -258,6 +302,14 @@ export function ControlTab() {
       modalImageRef.current.src = latestFrameUrlRef.current;
     }
   }, [cameraExpanded, robot.testingMode]);
+
+  useEffect(() => {
+    const hasSource = robot.testingMode || Boolean(robot.cameraFrame);
+    if (!modelLoaded || !hasSource || processingLive) return;
+    setProcessingLive(true);
+    robot.setModelStatus('running');
+    setModelMessage('Model connected. Detection started automatically.');
+  }, [modelLoaded, processingLive, robot, robot.cameraFrame, robot.testingMode]);
 
   useEffect(() => {
     let frameId = 0;
@@ -345,14 +397,20 @@ export function ControlTab() {
     return () => controller.abort();
   }, [pathPositions, robot.tomTomApiKey]);
 
-  const handleModelChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleModelChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     robot.setSelectedModelPath(file.name);
     robot.setModelStatus('loading');
     setModelLoaded(false);
     setModelMessage(`Loading ${file.name}...`);
+    try {
+      await writeStoredModel(file);
+    } catch (error) {
+      setModelMessage(error instanceof Error ? `Loaded ${file.name}, but saving failed: ${error.message}` : `Loaded ${file.name}, but saving failed.`);
+    }
     workerRef.current?.postMessage({ type: 'load-model', modelFile: file });
+    event.target.value = '';
   };
 
   const toggleTestingMode = () => {
@@ -415,14 +473,6 @@ export function ControlTab() {
     robot.setPainting({ active: true, mode, status: 'active' });
   };
 
-  const toggleEncoderPid = () => {
-    setEncoderPidOpen((open) => {
-      const nextOpen = !open;
-      if (!nextOpen) robot.sendEncoderPid({ kp: 1, ki: 0, kd: 0 });
-      return nextOpen;
-    });
-  };
-
   return (
     <div className="flex h-[calc(100vh-8.5rem)] flex-col gap-4 overflow-hidden">
       <SensorStrap th={th} />
@@ -473,31 +523,6 @@ export function ControlTab() {
             <ActionButton label="Reset" icon={<RotateCcw className="h-4 w-4" />} onClick={robot.resetScriptedMove} color="red" disabled={robot.pathExecStatus === 'idle'} />
           </div>
         </Card>}
-
-        <Card title="Drive Calibration" icon={<SlidersHorizontal className="h-4 w-4 text-cyan-400" />} th={th}>
-          <div className="grid grid-cols-2 gap-3">
-            <NumberInput label="Left Trim PWM" value={motorTrimLeft} min={-50} step={1} onChange={setMotorTrimLeft} th={th} />
-            <NumberInput label="Right Trim PWM" value={motorTrimRight} min={-50} step={1} onChange={setMotorTrimRight} th={th} />
-          </div>
-          <button type="button" onClick={() => robot.sendMotorTrim(motorTrimLeft, motorTrimRight)} disabled={!isConnected} className={`mt-3 flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono disabled:opacity-40 ${th.button}`}>
-            Apply motor trim
-          </button>
-          <div className="mt-4 flex items-center justify-between gap-3">
-            <span className={`text-xs font-mono uppercase ${th.label}`}>Encoder drift PID</span>
-            <button type="button" onClick={toggleEncoderPid} className={`rounded-lg border px-3 py-1.5 text-xs font-mono ${th.button}`}>
-              {encoderPidOpen ? 'Hide PID' : 'Show PID'}
-            </button>
-          </div>
-          {encoderPidOpen && <div className="mt-3 grid grid-cols-3 gap-3">
-            <NumberInput label="Kp" value={robot.pidLinear.kp} min={-10} step={0.1} onChange={(kp) => robot.setPidLinear({ ...robot.pidLinear, kp })} th={th} />
-            <NumberInput label="Ki" value={robot.pidLinear.ki} min={-10} step={0.01} onChange={(ki) => robot.setPidLinear({ ...robot.pidLinear, ki })} th={th} />
-            <NumberInput label="Kd" value={robot.pidLinear.kd} min={-10} step={0.01} onChange={(kd) => robot.setPidLinear({ ...robot.pidLinear, kd })} th={th} />
-          </div>}
-          {encoderPidOpen && <button type="button" onClick={() => robot.sendEncoderPid(robot.pidLinear)} disabled={!isConnected} className={`mt-3 flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono disabled:opacity-40 ${th.button}`}>
-            Apply encoder PID
-          </button>}
-          {!encoderPidOpen && <div className={`mt-3 rounded-lg border p-3 text-xs font-mono ${th.panel} ${th.label}`}>Hidden: Arduino is set to ENCODER PID 1 0 0.</div>}
-        </Card>
 
         {robot.mode === 'fully' && <Card title="Waypoint Autonomous" icon={<MapPinned className="h-4 w-4 text-green-400" />} th={th}>
           <NumberInput label={`Max Speed Limit (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.autonomousMaxSpeed} min={0.05} step={0.05} onChange={robot.setAutonomousMaxSpeed} th={th} />
@@ -703,6 +728,7 @@ function CameraPanel({ imageRef, videoRef, previewCanvasRef, canvasRef, frame, l
           Clear detections
         </button>
         <span className="text-xs font-mono text-slate-500">{message}</span>
+        <span className="text-xs font-mono text-slate-600">The selected model is saved in this browser and restored automatically next time.</span>
       </div>
       <div className="grid grid-cols-2 gap-2 text-xs font-mono lg:grid-cols-4">
         <label className="rounded border border-slate-700 p-2">
@@ -731,12 +757,10 @@ function CameraPanel({ imageRef, videoRef, previewCanvasRef, canvasRef, frame, l
 }
 
 function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
-  const { gps, imu, encoders, battery, latency, bridgeStats, arduinoTelemetry, cameraLive, gpsLive, imuLive, encodersLive, potholeCount, crackCount, testingMode } = useRobot();
+  const { gps, encoders, latency, bridgeStats, arduinoTelemetry, cameraLive, gpsLive, encodersLive, potholeCount, crackCount, testingMode } = useRobot();
   const navActive = telemetryBool(arduinoTelemetry, 'nav_active') || telemetryBool(arduinoTelemetry, 'wp_active');
   const targetDistance = telemetryNumber(arduinoTelemetry, 'target_distance_m');
   const headingError = telemetryNumber(arduinoTelemetry, 'heading_error');
-  const correctionTrim = telemetryNumber(arduinoTelemetry, 'correction_trim');
-  const encoderPidOutput = telemetryNumber(arduinoTelemetry, 'encoder_pid_output');
   const plotterStopped = telemetryBool(arduinoTelemetry, 'plotter_stopped_for_heading');
   const wpIndex = telemetryNumber(arduinoTelemetry, 'wp_index');
   const wpCount = telemetryNumber(arduinoTelemetry, 'wp_count');
@@ -747,24 +771,16 @@ function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
         <Metric label="GPS" value={gps.fix ? 'FIX' : 'NO FIX'} th={th} error={!gpsLive || !gps.fix} />
         <Metric label="Lat" value={gps.lat.toFixed(6)} th={th} />
         <Metric label="Lng" value={gps.lng.toFixed(6)} th={th} />
-        <Metric label="Accuracy" value={`${gps.accuracy.toFixed(1)} m`} th={th} />
         <Metric label="Compass" value={`${gps.heading.toFixed(1)} deg`} th={th} />
-        <Metric label="IMU Yaw" value={`${imu.yaw.toFixed(1)} deg`} th={th} error={!imuLive} />
-        <Metric label="Roll/Pitch" value={`${imu.roll.toFixed(1)} / ${imu.pitch.toFixed(1)}`} th={th} />
         <Metric label="Ticks L/R" value={`${encoders.leftTicks} / ${encoders.rightTicks}`} th={th} error={!encodersLive} />
         <Metric label="RPM L/R" value={`${encoders.leftRPM.toFixed(1)} / ${encoders.rightRPM.toFixed(1)}`} th={th} />
         <Metric label="Velocity" value={`${encoders.linearVelocity.toFixed(2)} m/s`} th={th} />
-        <Metric label="Odom Err" value={`${encoders.odometryError.toFixed(3)} m`} th={th} />
-        <Metric label="Battery" value={`${battery.toFixed(1)}%`} th={th} />
         <Metric label="Latency" value={`${latency.toFixed(0)} ms`} th={th} />
-        <Metric label="Bridge FPS" value={`${(bridgeStats?.loop_fps ?? bridgeStats?.stream_fps ?? 0).toFixed(1)}`} th={th} />
         <Metric label="Camera" value={testingMode ? 'TEST' : cameraLive ? 'LIVE' : 'OFFLINE'} th={th} error={!testingMode && (!cameraLive || Boolean(bridgeStats?.camera_error))} />
         <Metric label="Nav" value={navActive ? 'ACTIVE' : 'IDLE'} th={th} />
         <Metric label="WP" value={`${wpCount ? wpIndex + 1 : 0}/${wpCount}`} th={th} />
         <Metric label="Target" value={`${targetDistance.toFixed(2)} m`} th={th} />
         <Metric label="Head Err" value={`${headingError.toFixed(1)} deg`} th={th} error={Math.abs(headingError) > 8} />
-        <Metric label="Trim" value={`${correctionTrim.toFixed(0)} pwm`} th={th} />
-        <Metric label="PID Out" value={`${encoderPidOutput.toFixed(0)} pwm`} th={th} />
         <Metric label="Plotter" value={plotterStopped ? 'HEADING HOLD' : 'READY'} th={th} error={plotterStopped} />
         <Metric label="Potholes" value={String(potholeCount)} th={th} />
         <Metric label="Cracks" value={String(crackCount)} th={th} />
@@ -1028,6 +1044,22 @@ function clearCanvas(canvas: HTMLCanvasElement | null) {
   if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
+function formatDetectionMessage(stats: DetectionStats) {
+  const topPercent = (stats.topScore * 100).toFixed(0);
+  const thresholdPercent = (stats.confidenceThreshold * 100).toFixed(0);
+  const boxLabel = stats.detectionCount === 1 ? 'box' : 'boxes';
+
+  if (stats.detectionCount > 0) {
+    return `Model running: ${stats.detectionCount} ${boxLabel}. Top ${stats.topLabel} ${topPercent}%.`;
+  }
+
+  if (stats.topClassId >= 0) {
+    return `Model running: 0 boxes. Top ${stats.topLabel} ${topPercent}%, below confidence ${thresholdPercent}%.`;
+  }
+
+  return `Model running: 0 boxes. No valid candidates from output ${stats.outputShape.join('x')}.`;
+}
+
 function captureProcessedFrame(source: CanvasImageSource, settings: ReturnType<typeof useRobot>['imageProcessing'], canvasRef: React.MutableRefObject<HTMLCanvasElement | null>) {
   const size = getSourceSize(source);
   if (!size.width || !size.height) return '';
@@ -1100,4 +1132,49 @@ function headingVectorEnd(origin: [number, number], headingDeg: number, lengthM 
   const lat = origin[0] + (northM / radius) * (180 / Math.PI);
   const lng = origin[1] + (eastM / (radius * Math.cos((origin[0] * Math.PI) / 180))) * (180 / Math.PI);
   return [lat, lng];
+}
+
+async function writeStoredModel(file: File) {
+  const db = await openModelDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(MODEL_STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(MODEL_STORE_NAME);
+    const request = store.put({ name: file.name, blob: file, savedAt: Date.now() } satisfies StoredModelRecord, MODEL_STORE_KEY);
+    request.onerror = () => reject(request.error ?? new Error('Could not save the ONNX model.'));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error('Could not save the ONNX model.'));
+  });
+  db.close();
+}
+
+async function readStoredModel(): Promise<StoredModelRecord | null> {
+  const db = await openModelDb();
+  const result = await new Promise<StoredModelRecord | null>((resolve, reject) => {
+    const transaction = db.transaction(MODEL_STORE_NAME, 'readonly');
+    const store = transaction.objectStore(MODEL_STORE_NAME);
+    const request = store.get(MODEL_STORE_KEY);
+    request.onsuccess = () => resolve((request.result as StoredModelRecord | undefined) ?? null);
+    request.onerror = () => reject(request.error ?? new Error('Could not read the saved ONNX model.'));
+    transaction.onerror = () => reject(transaction.error ?? new Error('Could not read the saved ONNX model.'));
+  });
+  db.close();
+  return result;
+}
+
+function openModelDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB is not available in this browser.'));
+      return;
+    }
+    const request = indexedDB.open(MODEL_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(MODEL_STORE_NAME)) {
+        db.createObjectStore(MODEL_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('Could not open model storage.'));
+  });
 }

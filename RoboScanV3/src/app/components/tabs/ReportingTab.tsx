@@ -2,11 +2,13 @@ import React, { useMemo, useState } from 'react';
 import { BarChart2, Calendar, Download, FileText, TestTube2, Trash2 } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useRobot, ReportEvent, ReportSession } from '../../context/RobotContext';
+import { useTheme } from '../../context/ThemeContext';
 
 const EGYPT_TIME_ZONE = 'Africa/Cairo';
 
 export function ReportingTab() {
   const { reportEvents, detections, reportSessions, activeSession, flushReportData } = useRobot();
+  const { isDark } = useTheme();
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [sessionFilter, setSessionFilter] = useState('all');
@@ -122,13 +124,13 @@ export function ReportingTab() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-        <Summary label="Events" value={filteredEvents.length} />
-        <Summary label="Commands" value={summary.commands} color="text-sky-300" />
-        <Summary label="Readings" value={summary.readings} color="text-cyan-400" />
-        <Summary label="Potholes" value={summary.potholes} color="text-orange-400" />
-        <Summary label="Cracks" value={summary.cracks} color="text-yellow-400" />
-        <Summary label="Manual" value={summary.manual} color="text-blue-400" />
-        <Summary label="Test" value={summary.tests} color="text-purple-400" />
+        <Summary label="Events" value={filteredEvents.length} isDark={isDark} accent={isDark ? 'border-slate-500/50 bg-slate-800/80' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
+        <Summary label="Commands" value={summary.commands} isDark={isDark} accent={isDark ? 'border-sky-500/40 bg-sky-500/15' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
+        <Summary label="Readings" value={summary.readings} isDark={isDark} accent={isDark ? 'border-cyan-500/40 bg-cyan-500/15' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
+        <Summary label="Potholes" value={summary.potholes} isDark={isDark} accent={isDark ? 'border-orange-500/40 bg-orange-500/15' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
+        <Summary label="Cracks" value={summary.cracks} isDark={isDark} accent={isDark ? 'border-yellow-500/40 bg-yellow-500/15' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
+        <Summary label="Manual" value={summary.manual} isDark={isDark} accent={isDark ? 'border-blue-500/40 bg-blue-500/15' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
+        <Summary label="Test" value={summary.tests} isDark={isDark} accent={isDark ? 'border-fuchsia-500/40 bg-fuchsia-500/15' : 'border-slate-500 bg-slate-600'} color="text-white" labelColor="text-white" />
       </div>
 
       <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-5">
@@ -192,10 +194,24 @@ export function ReportingTab() {
   );
 }
 
-function Summary({ label, value, color = 'text-slate-100' }: { label: string; value: number; color?: string }) {
+function Summary({
+  label,
+  value,
+  isDark,
+  color = 'text-slate-100',
+  labelColor = 'text-slate-300',
+  accent = 'border-slate-700/60 bg-slate-900/60',
+}: {
+  label: string;
+  value: number;
+  isDark: boolean;
+  color?: string;
+  labelColor?: string;
+  accent?: string;
+}) {
   return (
-    <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4">
-      <div className="text-xs font-mono uppercase tracking-wider text-slate-500">{label}</div>
+    <div className={`rounded-xl border p-4 ${accent} ${isDark ? '' : 'shadow-sm'}`}>
+      <div className={`text-xs font-mono uppercase tracking-wider ${labelColor}`}>{label}</div>
       <div className={`mt-1 text-2xl font-semibold tabular-nums ${color}`}>{value}</div>
     </div>
   );

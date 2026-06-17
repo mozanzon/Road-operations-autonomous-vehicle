@@ -1,4 +1,4 @@
-import { createYoloSession, detectYolo, Detection, ModelInfo } from "./lib/yolo";
+import { createYoloSession, detectYoloDetailed, Detection, DetectionStats, ModelInfo } from "./lib/yolo";
 import type * as ort from "onnxruntime-web";
 
 type WorkerModel = {
@@ -28,6 +28,7 @@ type WorkerResponse =
       type: "detections";
       requestId: number;
       detections: Detection[];
+      stats: DetectionStats;
     }
   | {
       type: "error";
@@ -60,7 +61,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 
     const bitmap = await frameUrlToBitmap(message.frameUrl);
     try {
-      const detections = await detectYolo({
+      const result = await detectYoloDetailed({
         session: model.session,
         modelInfo: model.info,
         source: bitmap,
@@ -72,7 +73,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       postWorkerMessage({
         type: "detections",
         requestId: message.requestId,
-        detections,
+        detections: result.detections,
+        stats: result.stats,
       });
     } finally {
       bitmap.close();
