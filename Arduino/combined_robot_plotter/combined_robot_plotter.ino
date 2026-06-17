@@ -38,7 +38,6 @@
     PLOT DASH DIST <dash_m> <gap_m>
                        dashed plotting by measured travel distance
     PLOT OFF           plotter off
-    PLOT SPEED <0-255> set plotter motor speed
     PLOT DIST <meters> plot for this travel distance, 0 = unlimited
     PLOT TICKS <ticks> plot for this encoder tick distance, 0 = unlimited
     WHEEL RADIUS <m>   set wheel radius used for distance math
@@ -94,7 +93,7 @@ const int MIN_TURN_PWM = 25;
 const int DEFAULT_DRIVE_SPEED = 160;
 const int DEFAULT_TURN_SPEED = 60;
 const int DEFAULT_SPEED_CAP = 102;
-const int DEFAULT_PLOTTER_SPEED = 180;
+const uint8_t PLOTTER_MAX_PWM = 255;
 const long SERIAL_BAUD_RATE = 115200;
 const long GPS_BAUD_RATE = 9600;
 const float NAV_ARRIVAL_TOLERANCE_M = 2.0;
@@ -115,9 +114,9 @@ int activeDriveSpeed = DEFAULT_DRIVE_SPEED;
 int turnSpeed = DEFAULT_TURN_SPEED;
 int speedCap = DEFAULT_SPEED_CAP;
 int autoTurnSpeed = DEFAULT_TURN_SPEED;
-int plotterSpeed = DEFAULT_PLOTTER_SPEED;
 bool driveIsMoving = false;
 int driveDirection = 0;
+int turnMotionState = 0;
 float driveTargetHeading = 0.0;
 long driveStartLeftTicks = 0;
 long driveStartRightTicks = 0;
@@ -158,6 +157,14 @@ PlotterMode plotterMode = PLOTTER_OFF;
 bool plotterDashMotorOn = false;
 bool gpsOnlyMode = false;
 unsigned long lastTelemetryMs = 0;
+unsigned long lastGpsTelemetryMs = 0;
+uint32_t telemetrySequence = 0;
+uint32_t gpsTelemetrySequence = 0;
+bool lastGpsFixState = false;
+bool gpsFixStateInitialized = false;
+double lastValidGpsLat = 0.0;
+double lastValidGpsLng = 0.0;
+bool haveLastValidGps = false;
 unsigned long lastSpeedSampleMs = 0;
 long lastSpeedLeftTicks = 0;
 long lastSpeedRightTicks = 0;
@@ -213,8 +220,32 @@ const float DRIVE_HEADING_KP = 1.0;
 const int DRIVE_TRIM_LIMIT = 35;
 
 void updateGps() {
+  bool hadNewLocation = false;
   while (Serial2.available() > 0) {
-    gps.encode(Serial2.read());
+    if (gps.encode(Serial2.read()) && gps.location.isUpdated()) {
+      hadNewLocation = true;
+    }
+  }
+
+  bool fix = gpsHasFix();
+  if (fix) {
+    lastValidGpsLat = gps.location.lat();
+    lastValidGpsLng = gps.location.lng();
+    haveLastValidGps = true;
+  }
+
+  if (!gpsFixStateInitialized) {
+    lastGpsFixState = fix;
+    gpsFixStateInitialized = true;
+  } else if (fix != lastGpsFixState) {
+    Serial.print("E,");
+    Serial.println(fix ? "GPS_FIX_RECOVERED" : "GPS_FIX_LOST");
+    lastGpsFixState = fix;
+  }
+
+  if (hadNewLocation || millis() - lastGpsTelemetryMs >= 1000) {
+    printGpsPacket();
+    lastGpsTelemetryMs = millis();
   }
 }
 
@@ -225,6 +256,39 @@ unsigned long gpsAgeMs() {
 
 bool gpsHasFix() {
   return gps.location.isValid() && gps.location.age() < 5000;
+}
+
+void printConstantsPacket() {
+  Serial.print("C,");
+  Serial.print(wheelRadiusM, 3);
+  Serial.print(",");
+  Serial.print(TICKS_PER_REV, 0);
+  Serial.print(",");
+  Serial.print(ROBOT_TRACK_WIDTH_M, 3);
+  Serial.print(",");
+  Serial.print(dashPaintDistanceM, 3);
+  Serial.print(",");
+  Serial.println(dashGapDistanceM, 3);
+}
+
+void printGpsPacket() {
+  bool fix = gpsHasFix();
+  double lat = fix ? gps.location.lat() : (haveLastValidGps ? lastValidGpsLat : 0.0);
+  double lng = fix ? gps.location.lng() : (haveLastValidGps ? lastValidGpsLng : 0.0);
+  Serial.print("G,");
+  Serial.print(++gpsTelemetrySequence);
+  Serial.print(",");
+  Serial.print(millis());
+  Serial.print(",");
+  Serial.print(lat, 6);
+  Serial.print(",");
+  Serial.print(lng, 6);
+  Serial.print(",");
+  Serial.print(fix ? 1 : 0);
+  Serial.print(",");
+  Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
+  Serial.print(",");
+  Serial.println(gps.hdop.isValid() ? gps.hdop.hdop() : 999.0, 2);
 }
 
 void printGpsFields() {
@@ -333,11 +397,45 @@ void printNavigationFields() {
 }
 
 void printGpsStatus() {
-  Serial.print("STATUS");
-  printGpsFields();
-  printNavigationFields();
-  Serial.print("|gps_only=");
-  Serial.println(gpsOnlyMode ? 1 : 0);
+  printGpsPacket();
+  printConstantsPacket();
+}
+
+int motionStateCode() {
+  if (!driveIsMoving) return 0;
+  if (turnMotionState > 0) return turnMotionState;
+  if (driveDirection > 0) return 1;
+  if (driveDirection < 0) return 2;
+  return 0;
+}
+
+int navigationStateCode() {
+  if (navTurnActive) return 4;
+  switch (waypointState) {
+    case WP_STATE_LOADING: return 1;
+    case WP_STATE_LOADED: return 2;
+    case WP_STATE_RUNNING: return 3;
+    case WP_STATE_PAUSED: return 5;
+    case WP_STATE_DONE: return 6;
+    case WP_STATE_ERROR: return 7;
+    default:
+      return navActive ? 3 : 0;
+  }
+}
+
+bool plotterIsSpraying() {
+  if (!driveIsMoving || navHeadingAdjusting || plotDistanceReached) return false;
+  if (plotterMode == PLOTTER_CONT) return true;
+  if (plotterMode == PLOTTER_DASH) return plotterDashMotorOn;
+  return false;
+}
+
+int plotterStateCode() {
+  if (plotDistanceReached) return 5;
+  if (navHeadingAdjusting) return 4;
+  if (plotterMode == PLOTTER_CONT) return 1;
+  if (plotterMode == PLOTTER_DASH) return plotterDashMotorOn ? 2 : 3;
+  return 0;
 }
 
 void onLeftA() {
@@ -539,6 +637,7 @@ void beginForwardMotion(int speed) {
   activeDriveSpeed = speed;
   driveIsMoving = speed > 0;
   driveDirection = driveIsMoving ? 1 : 0;
+  turnMotionState = 0;
   navHeadingAdjusting = false;
   readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
   applyForwardPwm(speed, speed);
@@ -549,6 +648,7 @@ void beginBackwardMotion(int speed) {
   activeDriveSpeed = speed;
   driveIsMoving = speed > 0;
   driveDirection = driveIsMoving ? -1 : 0;
+  turnMotionState = 0;
   navHeadingAdjusting = false;
   readEncoderTicks(driveStartLeftTicks, driveStartRightTicks);
   applyBackwardPwm(speed, speed);
@@ -557,6 +657,7 @@ void beginBackwardMotion(int speed) {
 void stopDrive() {
   driveIsMoving = false;
   driveDirection = 0;
+  turnMotionState = 0;
   navDrivingSegment = false;
   navHeadingAdjusting = false;
   lastLeftCommandPwm = 0;
@@ -587,6 +688,7 @@ void startSpinLeft(int speed) {
   speed = cappedDrivePwm(speed);
   driveIsMoving = speed > 0;
   driveDirection = 0;
+  turnMotionState = speed > 0 ? 3 : 0;
   navDrivingSegment = false;
   navHeadingAdjusting = speed > 0;
   lastLeftCommandPwm = speed;
@@ -598,6 +700,7 @@ void startSpinRight(int speed) {
   speed = cappedDrivePwm(speed);
   driveIsMoving = speed > 0;
   driveDirection = 0;
+  turnMotionState = speed > 0 ? 4 : 0;
   navDrivingSegment = false;
   navHeadingAdjusting = speed > 0;
   lastLeftCommandPwm = speed;
@@ -637,9 +740,8 @@ void updateDriveControl() {
   else applyBackwardPwm(leftPwm, rightPwm);
 }
 
-void runPlotterForward(int speed) {
-  speed = constrain(speed, 0, 255);
-  analogWrite(PLOTTER_RPWM, speed);
+void runPlotterForward() {
+  analogWrite(PLOTTER_RPWM, PLOTTER_MAX_PWM);
   analogWrite(PLOTTER_LPWM, 0);
 }
 
@@ -653,12 +755,14 @@ void setPlotterMode(PlotterMode mode) {
   plotterDashMotorOn = false;
 
   if (plotterMode == PLOTTER_CONT) {
-    if (driveIsMoving) runPlotterForward(plotterSpeed);
+    Serial.println("E,PLOT_STARTED");
+    if (driveIsMoving) runPlotterForward();
     else stopPlotterMotor();
   } else if (plotterMode == PLOTTER_DASH) {
+    Serial.println("E,PLOT_STARTED");
     plotterDashMotorOn = true;
     resetDashSegmentStart();
-    if (driveIsMoving) runPlotterForward(plotterSpeed);
+    if (driveIsMoving) runPlotterForward();
     else stopPlotterMotor();
   } else {
     stopPlotterMotor();
@@ -693,6 +797,7 @@ void updatePlotter() {
     if (plotTravelDistanceM() >= plotDistanceTargetM) {
       stopPlotterMotor();
       plotDistanceReached = true;
+      Serial.println("E,PLOT_COMPLETED");
       return;
     }
   } else {
@@ -705,7 +810,7 @@ void updatePlotter() {
   }
 
   if (plotterMode == PLOTTER_CONT) {
-    runPlotterForward(plotterSpeed);
+    runPlotterForward();
     return;
   }
 
@@ -714,15 +819,16 @@ void updatePlotter() {
   float segmentTargetM = plotterDashMotorOn ? dashPaintDistanceM : dashGapDistanceM;
   if (segmentTargetM <= 0.0) segmentTargetM = 0.01;
   if (dashSegmentTravelDistanceM() < segmentTargetM) {
-    if (plotterDashMotorOn) runPlotterForward(plotterSpeed);
+    if (plotterDashMotorOn) runPlotterForward();
     else stopPlotterMotor();
     return;
   }
 
   plotterDashMotorOn = !plotterDashMotorOn;
   resetDashSegmentStart();
+  Serial.println(plotterDashMotorOn ? "E,PLOT_STARTED" : "E,PLOT_GAP_STARTED");
 
-  if (plotterDashMotorOn) runPlotterForward(plotterSpeed);
+  if (plotterDashMotorOn) runPlotterForward();
   else stopPlotterMotor();
 }
 
@@ -1008,6 +1114,8 @@ void advanceWaypointOrStop(float distanceM) {
   Serial.print(waypointIndex);
   Serial.print("|distance_m=");
   Serial.println(distanceM, 2);
+  Serial.print("E,WAYPOINT_ARRIVED,");
+  Serial.println(waypointIndex);
 
   if (navQueueActive && waypointIndex + 1 < waypointCount) {
     waypointIndex++;
@@ -1018,6 +1126,7 @@ void advanceWaypointOrStop(float distanceM) {
   navQueueActive = false;
   waypointIndex = min(waypointIndex, max(0, waypointCount - 1));
   Serial.println("ACK:WP_DONE");
+  Serial.println("E,ROUTE_COMPLETED");
   stopNavigation(true);
 }
 
@@ -1108,66 +1217,36 @@ void printStatus() {
   readEncoderTicks(leftTicks, rightTicks);
   float heading = readHeading();
 
-  Serial.print("STATUS");
-  Serial.print("|heading=");
-  Serial.print(heading, 2);
-  printCompassFields(heading);
-  Serial.print("|e1=");
+  Serial.print("M,");
+  Serial.print(++telemetrySequence);
+  Serial.print(",");
+  Serial.print(millis());
+  Serial.print(",");
   Serial.print(leftTicks);
-  Serial.print("|e2=");
+  Serial.print(",");
   Serial.print(rightTicks);
-  Serial.print("|de1=");
-  Serial.print(lastSpeedLeftDelta);
-  Serial.print("|de2=");
-  Serial.print(lastSpeedRightDelta);
-  Serial.print("|left_m=");
-  Serial.print(ticksToMeters(leftTicks), 3);
-  Serial.print("|right_m=");
-  Serial.print(ticksToMeters(rightTicks), 3);
-  Serial.print("|speed=");
-  Serial.print(measuredSpeedMps, 3);
-  Serial.print("|lspeed=");
-  Serial.print(driveIsMoving ? lastLeftCommandPwm : 0);
-  Serial.print("|rspeed=");
-  Serial.print(driveIsMoving ? lastRightCommandPwm : 0);
-  Serial.print("|battery=0");
-  printGpsFields();
-  printNavigationFields();
-  Serial.print("|drive_speed=");
-  Serial.print(driveSpeed);
-  Serial.print("|active_drive_speed=");
-  Serial.print(activeDriveSpeed);
-  Serial.print("|turn_speed=");
-  Serial.print(turnSpeed);
-  Serial.print("|auto_turn_speed=");
-  Serial.print(autoTurnSpeed);
-  Serial.print("|speed_cap=");
-  Serial.print(speedCap);
-  Serial.print("|drive_moving=");
-  Serial.print(driveIsMoving ? 1 : 0);
-  Serial.print("|wheel_radius_m=");
-  Serial.print(wheelRadiusM, 3);
-  Serial.print("|plot_mode=");
-  Serial.print(plotterModeName());
-  Serial.print("|plot_speed=");
-  Serial.print(plotterSpeed);
-  Serial.print("|spraying=");
-  Serial.print((driveIsMoving && plotterMode != PLOTTER_OFF && !plotDistanceReached) ? 1 : 0);
-  Serial.print("|dash_m=");
-  Serial.print(dashPaintDistanceM, 3);
-  Serial.print("|gap_m=");
-  Serial.print(dashGapDistanceM, 3);
-  Serial.print("|plot_target_m=");
-  Serial.print(plotDistanceTargetM, 3);
-  Serial.print("|plot_done=");
-  Serial.println(plotDistanceReached ? 1 : 0);
+  Serial.print(",");
+  Serial.print(heading, 2);
+  Serial.print(",");
+  Serial.print(compassOk ? 1 : 0);
+  Serial.print(",");
+  Serial.print(motionStateCode());
+  Serial.print(",");
+  Serial.print(navigationStateCode());
+  Serial.print(",");
+  Serial.print(waypointIndex);
+  Serial.print(",");
+  Serial.print(waypointCount);
+  Serial.print(",");
+  Serial.print(plotterStateCode());
+  Serial.print(",");
+  Serial.println(plotterIsSpraying() ? 1 : 0);
 }
 
 void printStatusIfDue() {
   if (millis() - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
     lastTelemetryMs = millis();
-    if (gpsOnlyMode) printGpsStatus();
-    else printStatus();
+    printStatus();
   }
 }
 
@@ -1293,7 +1372,6 @@ void printHelp() {
   Serial.println("  PLOT DASH               plotter dashed while moving");
   Serial.println("  PLOT DASH DIST <d> <g>  dashed plot/gap distances in meters");
   Serial.println("  PLOT OFF                plotter off");
-  Serial.println("  PLOT SPEED <0-255>      set plotter speed");
   Serial.println("  PLOT DIST <meters>      plot for distance, 0 = unlimited");
   Serial.println("  PLOT TICKS <ticks>      plot for encoder ticks, 0 = unlimited");
   Serial.println("  WHEEL RADIUS <meters>   set wheel radius for distance math");
@@ -1457,9 +1535,7 @@ void handleCommand(String cmd) {
   } else if (cmd == "PLOT OFF") {
     setPlotterMode(PLOTTER_OFF);
   } else if (cmd.startsWith("PLOT SPEED ")) {
-    plotterSpeed = constrain(cmd.substring(11).toInt(), 0, 255);
-    Serial.print("ACK:PLOT_SPEED|speed=");
-    Serial.println(plotterSpeed);
+    Serial.println("WARN:PLOT_SPEED_REMOVED");
   } else if (cmd.startsWith("PLOT DIST ")) {
     plotDistanceTargetM = cmd.substring(10).toFloat();
     if (plotDistanceTargetM < 0.0) plotDistanceTargetM = 0.0;
@@ -1490,6 +1566,7 @@ void handleCommand(String cmd) {
     }
   } else if (cmd == "STATUS") {
     printStatus();
+    printConstantsPacket();
   } else if (cmd == "GPS STATUS") {
     printGpsStatus();
   } else if (cmd == "GPS ONLY ON") {
@@ -1551,10 +1628,11 @@ void setup() {
   readEncoderTicks(lastSpeedLeftTicks, lastSpeedRightTicks);
   lastSpeedSampleMs = millis();
 
-  Serial.print("READY:Combined_RoboScan_controller|baud=");
+  Serial.print("READY,Combined_RoboScan_controller,baud=");
   Serial.println(SERIAL_BAUD_RATE);
-  Serial.print("READY:GPS_Serial2|baud=");
+  Serial.print("READY,GPS_Serial2,baud=");
   Serial.println(GPS_BAUD_RATE);
+  printConstantsPacket();
   printHelp();
 }
 

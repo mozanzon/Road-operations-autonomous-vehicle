@@ -343,9 +343,22 @@ export function ControlTab() {
     robot.setModelStatus('running');
     const tick = () => {
       const targetSource = currentSourceElement();
-      const frameUrl = targetSource
-        ? (robot.testingMode ? captureTestingFrame() : captureProcessedFrame(targetSource, robot.imageProcessing, processedCanvasRef))
-        : '';
+      let frameUrl = '';
+      try {
+        frameUrl = targetSource
+          ? (robot.testingMode ? captureTestingFrame() : captureProcessedFrame(targetSource, robot.imageProcessing, processedCanvasRef))
+          : '';
+      } catch (error) {
+        processingRef.current = false;
+        stopProcessing();
+        robot.setModelStatus('error');
+        setModelMessage(
+          error instanceof Error && error.name === 'SecurityError'
+            ? 'Camera stream blocked canvas reads. Restart the updated Pi bridge so it serves CORS-enabled MJPEG.'
+            : error instanceof Error ? error.message : 'Could not read camera frame for detection.',
+        );
+        return;
+      }
       if (!frameUrl || !targetSource || processingRef.current || !workerRef.current) {
         loopRef.current = window.setTimeout(tick, STREAM_INFERENCE_INTERVAL_MS);
         return;
@@ -366,7 +379,7 @@ export function ControlTab() {
       if (loopRef.current) window.clearTimeout(loopRef.current);
       robot.setModelStatus(modelLoaded ? 'ready' : 'idle');
     };
-  }, [captureTestingFrame, confidence, currentSourceElement, iou, modelLoaded, processingLive, robot.cameraFrame, robot.imageProcessing, robot.setModelStatus, robot.testingMode]);
+  }, [captureTestingFrame, confidence, currentSourceElement, iou, modelLoaded, processingLive, robot.cameraFrame, robot.imageProcessing, robot.setModelStatus, robot.testingMode, stopProcessing]);
 
   useEffect(() => {
     if (!robot.tomTomApiKey || pathPositions.length < 2) {
@@ -630,7 +643,7 @@ export function ControlTab() {
               {robot.testingMode ? (
                 <video ref={modalVideoRef} autoPlay muted playsInline className={`absolute inset-0 h-full w-full object-fill ${robot.imageProcessing.enabled && robot.imageProcessing.showProcessed ? 'opacity-0' : ''}`} />
               ) : (
-                <img ref={modalImageRef} alt="Expanded robot stream" className={`absolute inset-0 h-full w-full object-fill ${robot.imageProcessing.enabled && robot.imageProcessing.showProcessed ? 'opacity-0' : ''}`} />
+                <img ref={modalImageRef} crossOrigin="anonymous" alt="Expanded robot stream" className={`absolute inset-0 h-full w-full object-fill ${robot.imageProcessing.enabled && robot.imageProcessing.showProcessed ? 'opacity-0' : ''}`} />
               )}
               <canvas ref={modalPreviewCanvasRef} className={`absolute inset-0 h-full w-full ${robot.imageProcessing.enabled && robot.imageProcessing.showProcessed ? '' : 'hidden'}`} />
               <canvas ref={modalCanvasRef} className="absolute inset-0 h-full w-full" />
@@ -696,7 +709,7 @@ function CameraPanel({ imageRef, videoRef, previewCanvasRef, canvasRef, frame, l
         {testingMode ? (
           <video ref={videoRef} autoPlay muted playsInline className={`absolute inset-0 h-full w-full object-fill ${processedVisible ? 'opacity-0' : ''}`} />
         ) : (
-          <img ref={imageRef} alt="Robot camera stream" className={`absolute inset-0 h-full w-full object-fill ${frame && !processedVisible ? '' : 'opacity-0'}`} />
+          <img ref={imageRef} crossOrigin="anonymous" alt="Robot camera stream" className={`absolute inset-0 h-full w-full object-fill ${frame && !processedVisible ? '' : 'opacity-0'}`} />
         )}
         <canvas ref={previewCanvasRef} className={`absolute inset-0 h-full w-full ${processedVisible ? '' : 'hidden'}`} />
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
@@ -1118,7 +1131,12 @@ function paintProcessedPreview(source: CanvasImageSource | null, canvas: HTMLCan
 
 function getSourceSize(source: CanvasImageSource) {
   if (source instanceof HTMLVideoElement) return { width: source.videoWidth, height: source.videoHeight };
-  if (source instanceof HTMLImageElement) return { width: source.naturalWidth, height: source.naturalHeight };
+  if (source instanceof HTMLImageElement) {
+    return {
+      width: source.naturalWidth || source.clientWidth || source.width,
+      height: source.naturalHeight || source.clientHeight || source.height,
+    };
+  }
   if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) return { width: source.width, height: source.height };
   if (source instanceof ImageBitmap) return { width: source.width, height: source.height };
   return { width: 0, height: 0 };

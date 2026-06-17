@@ -145,6 +145,13 @@ export interface ReportEvent {
   trackingErrorM?: number;
   pathPosition?: number;
   totalMovedDistance?: number;
+  arduinoMs?: number;
+  sequence?: number;
+  gpsPacketAgeMs?: number;
+  motionState?: number;
+  navigationState?: number;
+  plotterState?: number;
+  spraying?: boolean;
 }
 
 export interface RobotContextType {
@@ -234,13 +241,19 @@ export interface RobotContextType {
 }
 
 type BridgePayload = {
-  frame?: string;
   arduino?: Record<string, unknown> | null;
+  motion?: Record<string, unknown> | null;
+  gps?: Record<string, unknown> | null;
+  constants?: Record<string, unknown> | null;
+  event?: Record<string, unknown> | null;
+  warn?: { type?: 'warn'; message?: string };
+  ready?: { type?: 'ready'; message?: string };
   raw?: string;
+  type?: string;
   timestamp_egypt?: string;
   timestamp_ms?: number;
   stats?: BridgeStats;
-  ack?: { type?: 'ack'; message?: string };
+  ack?: { type?: 'ack'; message?: string; command?: string; command_id?: number };
   error?: { type?: 'error'; message?: string };
 };
 
@@ -253,6 +266,7 @@ const PREF_STORAGE_KEY = 'roboscan-robot-preferences';
 const REPORT_EVENTS_STORAGE_KEY = 'roboscan-report-events';
 const REPORT_SESSIONS_STORAGE_KEY = 'roboscan-report-sessions';
 const BRIDGE_PORT = 8765;
+const CAMERA_PORT = 5000;
 const MIN_COMMAND_PWM = 1;
 const MAX_COMMAND_PWM = 255;
 const DEFAULT_ROBOT_SPEED_CAP = 0.4;
@@ -361,6 +375,13 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const lastTelemetryReportAtRef = useRef(0);
   const lastAckMessageRef = useRef('');
   const gpsPausedPlotterRef = useRef(false);
+  const commandIdRef = useRef(0);
+  const lastMotionSequenceRef = useRef<number | null>(null);
+  const lastGpsSequenceRef = useRef<number | null>(null);
+  const lastMotionPacketRef = useRef<Record<string, unknown> | null>(null);
+  const lastGpsPacketRef = useRef<Record<string, unknown> | null>(null);
+  const robotConstantsRef = useRef({ wheel_radius_m: 0.16, ticks_per_revolution: 2400, track_width_m: 0.5, dash_length_m: 0.5, gap_length_m: 0.3 });
+  const lastEncoderSampleRef = useRef<{ leftTicks: number; rightTicks: number; arduinoMs: number } | null>(null);
 
   useEffect(() => {
     latestRef.current = { gps, imu, encoders };
@@ -411,6 +432,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const timestamp = event.timestamp ?? Date.now();
     const snapshot = latestRef.current;
     const telemetry = latestTelemetryRef.current;
+    const motion = lastMotionPacketRef.current ?? {};
+    const gpsPacket = lastGpsPacketRef.current ?? {};
     setReportEvents((prev) => [{
       id: `${event.source}-${timestamp}-${prev.length}`,
       timestamp,
@@ -418,18 +441,25 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       imu: snapshot.imu,
       encoders: snapshot.encoders,
       sessionId,
-      arduino: telemetry,
+      arduino: null,
       mode,
-      motorMotion: stringFrom(telemetry ?? {}, ['motor_motion', 'motion', 'drive_motion'], inferMotorMotion(telemetry, snapshot.encoders)),
-      plotMode: stringFrom(telemetry ?? {}, ['plot_mode'], 'OFF'),
-      plotActive: boolFrom(telemetry ?? {}, ['spraying', 'plot_active'], false),
-      dashLengthM: numberFrom(telemetry ?? {}, ['dash_m'], painting.dashLength),
-      gapLengthM: numberFrom(telemetry ?? {}, ['gap_m'], painting.gapLength),
+      motorMotion: motionStateLabel(numberFrom(motion, ['motion_state'], 0)),
+      plotMode: plotterStateLabel(numberFrom(motion, ['plotter_state'], 0)),
+      plotActive: boolFrom(motion, ['spraying'], false),
+      dashLengthM: robotConstantsRef.current.dash_length_m,
+      gapLengthM: robotConstantsRef.current.gap_length_m,
       plottedDashedM: numberFrom(telemetry ?? {}, ['plotted_dashed_m'], 0),
       plottedUndashedM: numberFrom(telemetry ?? {}, ['plotted_undashed_m', 'plot_distance_m'], 0),
-      trackingErrorM: numberFrom(telemetry ?? {}, ['odometryError', 'odometry_error', 'odom_error', 'encoder_error'], snapshot.encoders.odometryError),
-      pathPosition: numberFrom(telemetry ?? {}, ['wp_index', 'path_position'], currentTargetIdx),
+      trackingErrorM: snapshot.encoders.odometryError,
+      pathPosition: numberFrom(motion, ['waypoint_index'], currentTargetIdx),
       totalMovedDistance: totalDistance,
+      arduinoMs: numberFrom(motion, ['arduino_ms'], numberFrom(gpsPacket, ['arduino_ms'], 0)),
+      sequence: numberFrom(motion, ['sequence'], numberFrom(gpsPacket, ['sequence'], 0)),
+      gpsPacketAgeMs: gpsPacket.timestamp ? Date.now() - numberFrom(gpsPacket, ['timestamp'], Date.now()) : 0,
+      motionState: numberFrom(motion, ['motion_state'], 0),
+      navigationState: numberFrom(motion, ['navigation_state'], 0),
+      plotterState: numberFrom(motion, ['plotter_state'], 0),
+      spraying: boolFrom(motion, ['spraying'], false),
       ...event,
     }, ...prev].slice(0, 10000));
   }, [currentTargetIdx, mode, painting.dashLength, painting.gapLength, totalDistance]);
@@ -437,13 +467,14 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const sendCommand = useCallback((command: string, payload?: Record<string, unknown>) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify(payload ? { type: command, ...payload } : { type: command }));
+    const commandId = ++commandIdRef.current;
+    socket.send(JSON.stringify(payload ? { type: command, command_id: commandId, ...payload } : { type: command, command_id: commandId }));
     if (activeSessionRef.current) {
       appendReportEvent({
         kind: 'command',
         source: 'robot',
         label: formatCommandLabel(command),
-        details: payload ? `${command} ${JSON.stringify(payload)}` : command,
+        details: payload ? `${command}#${commandId} ${JSON.stringify(payload)}` : `${command}#${commandId}`,
       });
     }
   }, [appendReportEvent]);
@@ -609,6 +640,129 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const handleArduinoPayload = useCallback((arduino: Record<string, unknown>) => {
     const now = Date.now();
+    const packetType = stringFrom(arduino, ['type'], '');
+    if (packetType === 'constants') {
+      robotConstantsRef.current = {
+        wheel_radius_m: numberFrom(arduino, ['wheel_radius_m'], robotConstantsRef.current.wheel_radius_m),
+        ticks_per_revolution: numberFrom(arduino, ['ticks_per_revolution'], robotConstantsRef.current.ticks_per_revolution),
+        track_width_m: numberFrom(arduino, ['track_width_m'], robotConstantsRef.current.track_width_m),
+        dash_length_m: numberFrom(arduino, ['dash_length_m'], robotConstantsRef.current.dash_length_m),
+        gap_length_m: numberFrom(arduino, ['gap_length_m'], robotConstantsRef.current.gap_length_m),
+      };
+      setPaintingState((prev) => ({ ...prev, dashLength: robotConstantsRef.current.dash_length_m, gapLength: robotConstantsRef.current.gap_length_m }));
+      latestTelemetryRef.current = arduino;
+      setArduinoTelemetry(arduino);
+      return;
+    }
+
+    if (packetType === 'event') {
+      const eventType = stringFrom(arduino, ['event_type'], 'EVENT');
+      const message = stringFrom(arduino, ['message'], eventType);
+      if (eventType === 'GPS_FIX_LOST') setGpsLive(false);
+      if (eventType === 'GPS_FIX_RECOVERED') setGpsLive(true);
+      if (eventType === 'ROUTE_COMPLETED') setPathExecStatus('idle');
+      if (eventType === 'PLOT_COMPLETED') setPaintingState((prev) => ({ ...prev, active: false, status: 'idle' }));
+      appendReportEvent({ kind: 'telemetry', source: 'robot', label: eventType, details: message, timestamp: now });
+      return;
+    }
+
+    if (packetType === 'gps') {
+      const sequence = numberFrom(arduino, ['sequence'], -1);
+      if (sequence >= 0 && lastGpsSequenceRef.current === sequence) return;
+      lastGpsSequenceRef.current = sequence;
+      const previousGps = latestRef.current.gps;
+      const fix = boolFrom(arduino, ['gps_fix'], false);
+      const candidateLat = numberFrom(arduino, ['latitude'], previousGps.lat);
+      const candidateLng = numberFrom(arduino, ['longitude'], previousGps.lng);
+      const hasCoordinate = isValidGpsCoordinate(candidateLat, candidateLng);
+      const distanceFromLast = hasCoordinate ? distanceMeters(previousGps.lat, previousGps.lng, candidateLat, candidateLng) : 0;
+      const isJumpGlitch = previousGps.timestamp > 0 && hasCoordinate && distanceFromLast > GPS_GLITCH_DISTANCE_M;
+      const acceptedCoordinate = fix && hasCoordinate && !isJumpGlitch;
+      const nextGps = {
+        lat: acceptedCoordinate ? candidateLat : previousGps.lat,
+        lng: acceptedCoordinate ? candidateLng : previousGps.lng,
+        speed: previousGps.speed,
+        heading: previousGps.heading,
+        fix,
+        accuracy: numberFrom(arduino, ['gps_hdop'], previousGps.accuracy),
+        timestamp: acceptedCoordinate ? now : previousGps.timestamp,
+      };
+      lastGpsPacketRef.current = { ...arduino, timestamp: now };
+      latestTelemetryRef.current = arduino;
+      setArduinoTelemetry(arduino);
+      setGps(nextGps);
+      setGpsLive(fix);
+      return;
+    }
+
+    if (packetType === 'motion') {
+      const sequence = numberFrom(arduino, ['sequence'], -1);
+      if (sequence >= 0 && lastMotionSequenceRef.current === sequence) return;
+      lastMotionSequenceRef.current = sequence;
+      lastMotionPacketRef.current = arduino;
+      latestTelemetryRef.current = arduino;
+      setArduinoTelemetry(arduino);
+      const leftTicks = numberFrom(arduino, ['left_ticks'], latestRef.current.encoders.leftTicks);
+      const rightTicks = numberFrom(arduino, ['right_ticks'], latestRef.current.encoders.rightTicks);
+      const arduinoMs = numberFrom(arduino, ['arduino_ms'], 0);
+      const previousSample = lastEncoderSampleRef.current;
+      const dtMs = previousSample ? arduinoMillisDelta(previousSample.arduinoMs, arduinoMs) : 0;
+      const leftDelta = previousSample && dtMs > 0 ? leftTicks - previousSample.leftTicks : 0;
+      const rightDelta = previousSample && dtMs > 0 ? rightTicks - previousSample.rightTicks : 0;
+      const distancePerTick = (2 * Math.PI * robotConstantsRef.current.wheel_radius_m) / Math.max(1, robotConstantsRef.current.ticks_per_revolution);
+      const leftDistance = leftDelta * distancePerTick;
+      const rightDistance = rightDelta * distancePerTick;
+      const dtMin = dtMs / 60000;
+      const dtSec = dtMs / 1000;
+      const leftRPM = dtMin > 0 ? leftDelta / robotConstantsRef.current.ticks_per_revolution / dtMin : 0;
+      const rightRPM = dtMin > 0 ? rightDelta / robotConstantsRef.current.ticks_per_revolution / dtMin : 0;
+      const linearVelocity = dtSec > 0 ? ((leftDistance + rightDistance) / 2) / dtSec : 0;
+      const odometryError = Math.abs(leftDistance - rightDistance);
+      lastEncoderSampleRef.current = { leftTicks, rightTicks, arduinoMs };
+      const heading = normalizeDegrees(numberFrom(arduino, ['heading'], latestRef.current.gps.heading));
+      setGps((prev) => ({ ...prev, heading }));
+      setImu((prev) => ({ ...prev, yaw: heading, timestamp: now }));
+      setImuLive(boolFrom(arduino, ['compass_ok'], false));
+      setEncoders((prev) => ({
+        leftTicks,
+        rightTicks,
+        leftRPM,
+        rightRPM,
+        linearVelocity,
+        odometryError,
+        errorHistory: [...prev.errorHistory.slice(-59), odometryError],
+        timestamp: now,
+      }));
+      setEncodersLive(true);
+      if (dtMs > 0) {
+        const segmentMeters = Math.max(0, (Math.abs(leftDistance) + Math.abs(rightDistance)) / 2);
+        setTotalDistance((prev) => prev + segmentMeters);
+        setSegmentDistance((prev) => prev + segmentMeters);
+      }
+      setCurrentTargetIdx(numberFrom(arduino, ['waypoint_index'], currentTargetIdx));
+      const navState = numberFrom(arduino, ['navigation_state'], 0);
+      if (navState === 5) setPathExecStatus('paused');
+      else if (navState === 3 || navState === 4) setPathExecStatus('running');
+      else if (navState === 0 || navState === 6 || navState === 7) setPathExecStatus('idle');
+      setPaintingState((prev) => ({
+        ...prev,
+        active: boolFrom(arduino, ['spraying'], false) || numberFrom(arduino, ['plotter_state'], 0) > 0,
+        mode: numberFrom(arduino, ['plotter_state'], 0) >= 2 ? 'dashed' : prev.mode,
+        status: boolFrom(arduino, ['spraying'], false) ? 'active' : prev.status,
+      }));
+      if (activeSessionRef.current && now - lastTelemetryReportAtRef.current >= 1000) {
+        lastTelemetryReportAtRef.current = now;
+        appendReportEvent({
+          kind: 'telemetry',
+          source: 'robot',
+          label: 'Telemetry snapshot',
+          details: `Motion ${motionStateLabel(numberFrom(arduino, ['motion_state'], 0))}; plot ${plotterStateLabel(numberFrom(arduino, ['plotter_state'], 0))}`,
+          timestamp: now,
+        });
+      }
+      return;
+    }
+
     latestTelemetryRef.current = arduino;
     setArduinoTelemetry(arduino);
     const hasLat = hasAny(arduino, ['lat', 'latitude', 'gps_lat', 'la']);
@@ -751,6 +905,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       lastMessageAtRef.current = Date.now();
       setConnectionStatus('connected');
       setHostname(host);
+      setCameraFrame(`http://${host}:${CAMERA_PORT}/video_feed`);
+      setCameraLive(true);
       setConnectionMessage('Socket opened. Waiting for bridge telemetry...');
       socket.send(JSON.stringify({ type: 'compass_offset', degrees: compassOffset }));
     };
@@ -763,44 +919,40 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       if (payload.stats) {
         setBridgeStats({
           ...payload.stats,
-          latest_ack: payload.ack?.message,
-          latest_error: payload.error?.message,
+          latest_ack: payload.ack?.message ?? payload.ack?.command ?? payload.ready?.message,
+          latest_error: payload.error?.message ?? payload.warn?.message,
         });
         setCameraLive(Boolean(payload.stats.camera_connected || payload.stats.camera_has_frame));
         if (payload.stats.path_status) setPathExecStatus(payload.stats.path_status);
         if (typeof payload.stats.current_target_idx === 'number') setCurrentTargetIdx(payload.stats.current_target_idx);
         if (typeof payload.stats.scripted_step_idx === 'number') setScriptedStepIdx(payload.stats.scripted_step_idx);
       }
-      if ((payload.ack || payload.error) && !payload.stats) {
+      if ((payload.ack || payload.error || payload.warn || payload.ready) && !payload.stats) {
         setBridgeStats((prev) => ({
           ...(prev ?? {}),
-          latest_ack: payload.ack?.message ?? prev?.latest_ack,
-          latest_error: payload.error?.message ?? prev?.latest_error,
+          latest_ack: payload.ack?.message ?? payload.ack?.command ?? payload.ready?.message ?? prev?.latest_ack,
+          latest_error: payload.error?.message ?? payload.warn?.message ?? prev?.latest_error,
         }));
       }
-      if (payload.ack?.message && payload.ack.message !== lastAckMessageRef.current) {
-        lastAckMessageRef.current = payload.ack.message;
-        if (/^(WP_|NAV_|GOTO)/.test(payload.ack.message)) {
+      const ackMessage = payload.ack?.message ?? payload.ack?.command;
+      if (ackMessage && ackMessage !== lastAckMessageRef.current) {
+        lastAckMessageRef.current = ackMessage;
+        if (/^(WP_|NAV_|GOTO|movement|stop|plot)/i.test(ackMessage)) {
           appendReportEvent({
             kind: 'command',
             source: 'robot',
-            label: payload.ack.message.split('|')[0].replace(/_/g, ' '),
-            details: payload.ack.message,
+            label: ackMessage.split('|')[0].replace(/_/g, ' '),
+            details: payload.ack?.command_id ? `${ackMessage}#${payload.ack.command_id}` : ackMessage,
             timestamp: typeof payload.timestamp_ms === 'number' ? payload.timestamp_ms : Date.now(),
           });
         }
       }
-      const arduinoPayload = payload.arduino ?? parseCompactArduinoStatus(payload.raw);
+      const arduinoPayload = payload.motion ?? payload.gps ?? payload.constants ?? payload.event ?? payload.arduino ?? parseCompactArduinoStatus(payload.raw);
       if (arduinoPayload) handleArduinoPayload(arduinoPayload);
-      if (payload.frame) {
-        setCameraFrame(`data:image/jpeg;base64,${payload.frame}`);
-        setCameraLive(true);
-      }
     };
     socket.onerror = () => {
       setConnectionStatus('disconnected');
       setConnectionMessage(`WebSocket error while connecting to ${host}:${BRIDGE_PORT}. Check the Pi IP, port 8765, and bridge process.`);
-      setCameraLive(false);
     };
     socket.onclose = (event) => {
       if (socketRef.current === socket) {
@@ -817,7 +969,6 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         connectedAtRef.current = null;
         lastMessageAtRef.current = null;
         receivedBridgeMessageRef.current = false;
-        setCameraLive(false);
       }
     };
   }, [appendReportEvent, compassOffset, connectionIp, connectionStatus, disconnect, handleArduinoPayload]);
@@ -1069,7 +1220,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     sendVelocity(0, 0);
     setPathExecStatus('idle');
     setPaintingState((prev) => ({ ...prev, active: false, status: 'idle' }));
-    sendCommand('stop');
+    sendCommand('emergency_stop');
   }, [sendCommand, sendVelocity]);
 
   const setSelectedModelPath = useCallback((value: string) => {
@@ -1252,6 +1403,20 @@ function normalizeDegrees(value: number): number {
 function normalizeSignedDegrees(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return ((((value % 360) + 540) % 360) - 180);
+}
+
+function arduinoMillisDelta(previous: number, current: number): number {
+  if (!Number.isFinite(previous) || !Number.isFinite(current)) return 0;
+  if (current >= previous) return current - previous;
+  return (current + 4294967296) - previous;
+}
+
+function motionStateLabel(value: number): string {
+  return ['stopped', 'forward', 'backward', 'turning left', 'turning right'][value] ?? 'unknown';
+}
+
+function plotterStateLabel(value: number): string {
+  return ['off', 'continuous painting', 'dashed painting', 'dashed gap', 'paused', 'completed', 'error'][value] ?? 'unknown';
 }
 
 function isValidGpsCoordinate(lat: number, lng: number): boolean {

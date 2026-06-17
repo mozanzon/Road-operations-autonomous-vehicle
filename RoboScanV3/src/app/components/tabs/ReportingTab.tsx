@@ -229,21 +229,35 @@ function formatEvent(event: ReportEvent) {
 }
 
 function buildWorkbook(events: ReportEvent[], sessions: ReportSession[], summary: { commands: number; readings: number; sessionEvents: number; potholes: number; cracks: number; manual: number; tests: number }) {
+  const telemetryEvents = events.filter((event) => event.kind === 'telemetry');
+  const detectionEvents = events.filter((event) => event.kind === 'detection');
+  const maxSpeed = Math.max(0, ...telemetryEvents.map((event) => Math.abs(event.encoders.linearVelocity)));
+  const totalDistance = Math.max(0, ...telemetryEvents.map((event) => event.totalMovedDistance ?? 0));
+  const trackingErrors = telemetryEvents.map((event) => Math.abs(event.trackingErrorM ?? event.encoders.odometryError ?? 0));
   const overviewRows = [
     ['Metric', 'Value'],
     ['Generated Egypt Time', formatEgyptDateTime(Date.now())],
-    ['Events', events.length],
-    ['Commands', summary.commands],
-    ['Readings', summary.readings],
-    ['Session events', summary.sessionEvents],
-    ['Potholes', summary.potholes],
-    ['Cracks', summary.cracks],
-    ['Manual readings', summary.manual],
-    ['Test records', summary.tests],
     ['Sessions in export', sessions.length],
-    ['GPS fix rows', events.filter((event) => event.gps.fix).length],
-    ['Plot active rows', events.filter((event) => event.plotActive).length],
-    ['Total moved distance max', Math.max(0, ...events.map((event) => event.totalMovedDistance ?? 0))],
+    ['Session ID', sessions.map((session) => session.id).join(', ')],
+    ['Mode', sessions.map((session) => session.mode).join(', ')],
+    ['Start and end time', sessions.map((session) => `${formatEgyptDateTime(session.startedAt)} - ${session.endedAt ? formatEgyptDateTime(session.endedAt) : 'active'}`).join('; ')],
+    ['Duration', sessions.reduce((sum, session) => sum + (session.endedAt ? Math.round((session.endedAt - session.startedAt) / 1000) : 0), 0)],
+    ['Pothole count', summary.potholes],
+    ['Crack count', summary.cracks],
+    ['GPS availability', telemetryEvents.length ? `${Math.round((telemetryEvents.filter((event) => event.gps.fix).length / telemetryEvents.length) * 100)}%` : '0%'],
+    ['Maximum GPS HDOP', Math.max(0, ...events.map((event) => event.gps.accuracy).filter(Number.isFinite))],
+    ['Total distance', totalDistance],
+    ['Average speed', average(telemetryEvents.map((event) => Math.abs(event.encoders.linearVelocity)))],
+    ['Maximum speed', maxSpeed],
+    ['Average tracking error', average(trackingErrors)],
+    ['Maximum tracking error', Math.max(0, ...trackingErrors)],
+    ['Average display heading error', ''],
+    ['Maximum display heading error', ''],
+    ['Painted distance', Math.max(0, ...telemetryEvents.map((event) => event.plottedUndashedM ?? 0))],
+    ['Gap distance', Math.max(0, ...telemetryEvents.map((event) => event.plottedDashedM ?? 0))],
+    ['Route completion', telemetryEvents.some((event) => event.navigationState === 6) ? 'completed' : 'not completed'],
+    ['Emergency-stop count', events.filter((event) => /emergency/i.test(`${event.label} ${event.details ?? ''}`)).length],
+    ['Shared robot constants', constantsSummary(events)],
     [],
     ['Session ID', 'Mode', 'Started Egypt Time', 'Ended Egypt Time', 'Duration s'],
     ...sessions.map((session) => [
@@ -254,94 +268,94 @@ function buildWorkbook(events: ReportEvent[], sessions: ReportSession[], summary
       session.endedAt ? Math.round((session.endedAt - session.startedAt) / 1000) : '',
     ]),
   ];
-  const detailHeaders = [
-    'Egypt Timestamp', 'Unix Timestamp ms', 'Session ID', 'Event Type', 'Label', 'Message', 'Source', 'Mode',
-    'GPS Fix', 'Latitude', 'Longitude', 'Compass Heading', 'GPS Course', 'GPS Speed', 'GPS Accuracy',
-    'IMU Roll', 'IMU Pitch', 'IMU Yaw', 'Accel X', 'Accel Y', 'Accel Z', 'Gyro X', 'Gyro Y', 'Gyro Z',
-    'Left Ticks', 'Right Ticks', 'Left Meters', 'Right Meters', 'Linear Speed',
-    'Motor Motion', 'Drive Moving', 'Drive Speed PWM', 'Active Drive PWM', 'Left PWM', 'Right PWM',
-    'Waypoint Active', 'Waypoint Index', 'Waypoint Count', 'Target Bearing', 'Target Distance (m)', 'Heading Error (deg)',
-    'Heading Adjusting', 'Turn Active', 'Turn Expected Ticks', 'Encoder Error', 'Encoder PID P', 'Encoder PID I', 'Encoder PID D', 'Encoder PID Output',
-    'Plot Mode', 'Plot Active', 'Dash Length (m)', 'Gap Length (m)', 'Plot Target (m)', 'Plotted Dashed (m)', 'Plotted Undashed (m)',
-    'Tracking Error (m)', 'Path Position', 'Total Moved Distance', 'Confidence', 'Raw Telemetry',
-  ];
-  const detailRows = [
-    detailHeaders,
-    ...events.map((event) => [
+  const telemetryRows = [
+    [
+      'Egypt Timestamp', 'Unix Timestamp ms', 'Arduino Timestamp', 'Sequence', 'Session ID', 'Robot Mode',
+      'Latitude', 'Longitude', 'GPS Fix', 'Satellite Count', 'GPS HDOP', 'GPS Packet Age',
+      'Heading', 'Compass Status', 'Left Encoder Ticks', 'Right Encoder Ticks', 'Left RPM', 'Right RPM',
+      'Linear Speed', 'Tracking Error', 'Total Distance', 'Segment Distance', 'Motion State', 'Navigation State',
+      'Waypoint Index', 'Waypoint Count', 'Plotter State', 'Spraying', 'Painted Distance', 'Gap Distance', 'Marking Progress',
+    ],
+    ...telemetryEvents.map((event) => [
       formatEgyptDateTime(event.timestamp),
       event.timestamp,
+      event.arduinoMs ?? '',
+      event.sequence ?? '',
       event.sessionId ?? '',
-      event.kind,
-      event.label,
-      event.details || event.label,
-      event.source,
       event.mode ?? '',
-      event.gps.fix ? 1 : 0,
       event.gps.lat,
       event.gps.lng,
-      event.gps.heading,
-      valueFromTelemetry(event, 'gps_course') ?? valueFromTelemetry(event, 'gpsCourse'),
-      event.gps.speed,
+      event.gps.fix ? 1 : 0,
+      '',
       event.gps.accuracy,
-      event.imu.roll,
-      event.imu.pitch,
-      event.imu.yaw,
-      event.imu.accelX,
-      event.imu.accelY,
-      event.imu.accelZ,
-      event.imu.gyroX,
-      event.imu.gyroY,
-      event.imu.gyroZ,
+      event.gpsPacketAgeMs ?? '',
+      event.gps.heading,
+      '',
       event.encoders.leftTicks,
       event.encoders.rightTicks,
-      valueFromTelemetry(event, 'left_m'),
-      valueFromTelemetry(event, 'right_m'),
+      event.encoders.leftRPM,
+      event.encoders.rightRPM,
       event.encoders.linearVelocity,
-      event.motorMotion ?? '',
-      valueFromTelemetry(event, 'drive_moving'),
-      valueFromTelemetry(event, 'drive_speed'),
-      valueFromTelemetry(event, 'active_drive_speed'),
-      valueFromTelemetry(event, 'left_pwm'),
-      valueFromTelemetry(event, 'right_pwm'),
-      valueFromTelemetry(event, 'wp_active'),
-      valueFromTelemetry(event, 'wp_index'),
-      valueFromTelemetry(event, 'wp_count'),
-      valueFromTelemetry(event, 'target_bearing'),
-      valueFromTelemetry(event, 'target_distance_m'),
-      valueFromTelemetry(event, 'heading_error'),
-      valueFromTelemetry(event, 'heading_adjusting'),
-      valueFromTelemetry(event, 'turn_active'),
-      valueFromTelemetry(event, 'turn_expected_ticks'),
-      valueFromTelemetry(event, 'encoder_error'),
-      valueFromTelemetry(event, 'encoder_pid_kp'),
-      valueFromTelemetry(event, 'encoder_pid_ki'),
-      valueFromTelemetry(event, 'encoder_pid_kd'),
-      valueFromTelemetry(event, 'encoder_pid_output'),
-      event.plotMode ?? '',
-      event.plotActive ? 1 : 0,
-      event.dashLengthM ?? '',
-      event.gapLengthM ?? '',
-      valueFromTelemetry(event, 'plot_target_m'),
-      event.plottedDashedM ?? '',
-      event.plottedUndashedM ?? '',
-      event.trackingErrorM ?? '',
-      event.pathPosition ?? '',
+      event.trackingErrorM ?? event.encoders.odometryError,
       event.totalMovedDistance ?? '',
+      '',
+      event.motionState ?? event.motorMotion ?? '',
+      event.navigationState ?? '',
+      event.pathPosition ?? '',
+      '',
+      event.plotterState ?? event.plotMode ?? '',
+      event.spraying ?? event.plotActive ? 1 : 0,
+      event.plottedUndashedM ?? '',
+      event.plottedDashedM ?? '',
+      event.totalMovedDistance && event.totalMovedDistance > 0 ? ((event.plottedUndashedM ?? 0) / event.totalMovedDistance) : '',
+    ]),
+  ];
+  const eventRows = [
+    ['Timestamp', 'Session ID', 'Event Type', 'Event Message', 'GPS Position', 'Waypoint Index', 'Motion State', 'Navigation State', 'Plotter State'],
+    ...events.filter((event) => event.kind !== 'detection').map((event) => [
+      formatEgyptDateTime(event.timestamp),
+      event.sessionId ?? '',
+      event.label,
+      event.details || event.label,
+      `${event.gps.lat.toFixed(6)},${event.gps.lng.toFixed(6)}`,
+      event.pathPosition ?? '',
+      event.motionState ?? event.motorMotion ?? '',
+      event.navigationState ?? '',
+      event.plotterState ?? event.plotMode ?? '',
+    ]),
+  ];
+  const detectionRows = [
+    ['Timestamp', 'Session ID', 'Detection Class', 'Confidence', 'Latitude', 'Longitude', 'GPS Status', 'Detection Source', 'Duplicate Filtering Result'],
+    ...detectionEvents.map((event) => [
+      formatEgyptDateTime(event.timestamp),
+      event.sessionId ?? '',
+      event.label,
       event.confidence ?? '',
-      event.arduino ? JSON.stringify(event.arduino) : '',
+      event.gps.lat,
+      event.gps.lng,
+      event.gps.fix ? 'fixed' : 'lost',
+      event.source,
+      event.details ?? '',
     ]),
   ];
   return createXlsx([
     { name: 'Overview', rows: overviewRows },
-    { name: 'Details', rows: detailRows },
+    { name: 'Telemetry', rows: telemetryRows },
+    { name: 'Events', rows: eventRows },
+    { name: 'Detections', rows: detectionRows },
   ]);
 }
 
-function valueFromTelemetry(event: ReportEvent, key: string) {
-  const value = event.arduino?.[key];
-  return typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean' ? value : '';
+function average(values: number[]) {
+  const finite = values.filter(Number.isFinite);
+  return finite.length ? finite.reduce((sum, value) => sum + value, 0) / finite.length : 0;
 }
 
+function constantsSummary(events: ReportEvent[]) {
+  const first = events.find((event) => event.dashLengthM || event.gapLengthM);
+  if (!first) return '';
+  return `dash=${first.dashLengthM ?? ''}, gap=${first.gapLengthM ?? ''}`;
+}
 function egyptDateKey(timestamp: number) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: EGYPT_TIME_ZONE,

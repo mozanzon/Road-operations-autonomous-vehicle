@@ -794,8 +794,8 @@ function getSourceSize(source: CanvasImageSource): { width: number; height: numb
 
   if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) {
     return {
-      width: source.naturalWidth,
-      height: source.naturalHeight,
+      width: source.naturalWidth || source.clientWidth || source.width,
+      height: source.naturalHeight || source.clientHeight || source.height,
     };
   }
 
