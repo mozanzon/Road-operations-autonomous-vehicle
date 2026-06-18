@@ -4,21 +4,21 @@ import { useTheme } from '../../context/ThemeContext';
 const ABOUT_CARDS = [
   {
     src: '/about-picture-1.png',
-    title: 'RoboScan Field Unit',
-    brief: 'Road inspection platform prepared for live detection, mapping, and autonomous route trials.',
-    href: 'https://example.com/roboscan-field-unit',
+    title: 'Ministry of Defense',
+    brief: 'Our sponsor',
+    href: 'https://www.mod.gov.eg/modwebsite/Default.aspx',
   },
   {
     src: '/about-picture-2.png',
-    title: 'Detection Workflow',
-    brief: 'Camera and model workflow for pothole and crack counting during manual, semi, and fully autonomous modes.',
-    href: 'https://example.com/roboscan-detection',
+    title: 'Thebes Group',
+    brief: 'Our sponsor',
+    href: 'https://groupthebes.com/',
   },
   {
     src: '/about-picture-3.png',
-    title: 'Control And Routing',
-    brief: 'Operator interface for sensor telemetry, scripted movement, waypoint routing, and road painting control.',
-    href: 'https://example.com/roboscan-control',
+    title: 'ASRT Egypt',
+    brief: 'Our sponsor',
+    href: 'https://www.facebook.com/ASRTEgypt/https://www.facebook.com/ASRTEgypt/',
   },
 ];
 
@@ -37,6 +37,11 @@ export function AboutTab() {
         </p>
       </section>
 
+      <section>
+        <h3 className="font-mono text-sm font-semibold uppercase tracking-[0.24em] text-amber-500">Our Sponsors</h3>
+        <p className={`mt-2 text-sm ${muted}`}>The organizations below are our sponsors.</p>
+      </section>
+
       <section className="grid gap-4 md:grid-cols-3">
         {ABOUT_CARDS.map((item) => (
           <a
@@ -44,21 +49,21 @@ export function AboutTab() {
             href={item.href}
             target="_blank"
             rel="noreferrer"
-            className={`group relative block overflow-hidden rounded-lg border ${card}`}
+            className={`group flex flex-col items-center rounded-lg border p-4 text-center transition-colors hover:border-amber-500/60 ${card}`}
           >
-            <div className="aspect-[4/3] overflow-hidden bg-slate-950">
+            <div className="flex h-24 items-center justify-center overflow-hidden">
               <img
                 src={item.src}
                 alt={item.title}
-                className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                className="max-h-16 w-auto object-contain transition duration-300 group-hover:scale-105"
               />
             </div>
-            <div className="absolute inset-0 flex flex-col justify-end bg-gradient-to-t from-black/80 via-black/20 to-transparent p-4 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-              <div className="flex items-center gap-2 text-sm font-semibold text-white">
+            <div className="mt-3">
+              <div className={`flex items-center justify-center gap-2 text-sm font-semibold ${pageText}`}>
                 {item.title}
-                <ExternalLink className="h-4 w-4" />
+                <ExternalLink className="h-4 w-4 text-amber-500" />
               </div>
-              <p className="mt-1 text-xs leading-5 text-slate-200">{item.brief}</p>
+              <p className={`mt-1 text-xs leading-5 ${muted}`}>{item.brief}</p>
             </div>
           </a>
         ))}

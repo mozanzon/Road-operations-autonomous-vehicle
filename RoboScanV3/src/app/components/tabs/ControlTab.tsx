@@ -476,11 +476,11 @@ export function ControlTab() {
   };
 
   return (
-    <div className="flex h-[calc(100vh-8.5rem)] flex-col gap-4 overflow-hidden">
+    <div className="flex h-[calc(100vh-8rem)] flex-col gap-3 overflow-hidden">
       <SensorStrap th={th} />
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden xl:grid-cols-[minmax(360px,0.95fr)_minmax(460px,1.05fr)]">
-      <section className="min-h-0 space-y-4 overflow-y-auto pr-1">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden xl:grid-cols-[minmax(340px,0.88fr)_minmax(500px,1.12fr)]">
+      <section className="min-h-0 space-y-3 pr-1">
         <Card title="Operation Mode" icon={<Bot className="h-4 w-4 text-amber-400" />} th={th}>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             {modeButton('manual', 'User', Gauge)}
@@ -490,18 +490,20 @@ export function ControlTab() {
         </Card>
 
         {robot.mode === 'manual' && <Card title="User Movement" icon={<CircleDot className="h-4 w-4 text-blue-400" />} th={th}>
-          <NumberInput label={`User Speed (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.manualSpeed} min={0.05} step={0.05} onChange={robot.setManualSpeed} th={th} />
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+            <NumberInput label={`User Speed (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.manualSpeed} min={0.05} step={0.05} onChange={robot.setManualSpeed} th={th} />
+            <button type="button" onClick={() => robot.sendVelocity(0, 0)} className="rounded-lg border border-red-500/40 bg-red-500/15 px-3 py-2 text-xs font-mono text-red-400">STOP</button>
+          </div>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className={`flex overflow-hidden rounded-lg border ${th.isDark ? 'border-slate-600' : 'border-slate-300'}`}>
               <button onClick={() => setInputMode('toggle')} className={`px-3 py-1.5 text-xs font-mono ${inputMode === 'toggle' ? 'bg-blue-500 text-white' : th.button}`}>TOGGLE DEFAULT</button>
               <button onClick={() => setInputMode('hold')} className={`px-3 py-1.5 text-xs font-mono ${inputMode === 'hold' ? 'bg-blue-500 text-white' : th.button}`}>HOLD</button>
             </div>
-            <button type="button" onClick={() => robot.sendVelocity(0, 0)} className="rounded-lg border border-red-500/40 bg-red-500/15 px-3 py-1.5 text-xs font-mono text-red-400">STOP</button>
           </div>
           <div className="flex justify-center">
             <DPad onChange={robot.sendVelocity} speedLimit={robot.manualSpeed} toggleMode={inputMode === 'toggle'} />
           </div>
-          <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="mt-2 grid grid-cols-2 gap-2">
             <Metric label="Cmd Vel" value={`${robot.joystickOutput.linear.toFixed(2)} m/s`} th={th} />
             <Metric label="Cmd Ang" value={`${robot.joystickOutput.angular.toFixed(2)} r/s`} th={th} />
           </div>
@@ -531,7 +533,7 @@ export function ControlTab() {
             </div>
           </div>
           <ScriptedMoveList th={th} />
-          <div className="mt-4 grid grid-cols-3 gap-2">
+          <div className="mt-3 grid grid-cols-3 gap-2">
             <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={robot.startScriptedMove} color="green" disabled={!isConnected} />
             <ActionButton label="Pause" icon={<Pause className="h-4 w-4" />} onClick={robot.pauseScriptedMove} color="amber" disabled={robot.pathExecStatus !== 'running'} />
             <ActionButton label="Reset" icon={<RotateCcw className="h-4 w-4" />} onClick={robot.resetScriptedMove} color="red" disabled={robot.pathExecStatus === 'idle'} />
@@ -558,7 +560,7 @@ export function ControlTab() {
               </div>
             ))}
           </div>
-          <div className="mt-4 grid grid-cols-4 gap-2">
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
             <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={() => robot.startPath({ points: (routePositions.length ? routePositions : sortedWaypoints.map(({ lat, lng }) => [lat, lng] as [number, number])).map(([lat, lng]) => ({ lat, lng })), source: routePositions.length ? 'tomtom' : 'direct', maxSpeed: robot.autonomousMaxSpeed })} color="green" disabled={!isConnected || sortedWaypoints.length === 0 || !robot.gps.fix} />
             <ActionButton label="Pause" icon={<Pause className="h-4 w-4" />} onClick={robot.pausePath} color="amber" disabled={robot.pathExecStatus !== 'running'} />
             <ActionButton label="Resume" icon={<Play className="h-4 w-4" />} onClick={robot.resumePath} color="green" disabled={robot.pathExecStatus !== 'paused'} />
@@ -570,31 +572,33 @@ export function ControlTab() {
           {robot.bridgeStats?.autonomous_note && <div className="mt-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-xs font-mono text-sky-200">{robot.bridgeStats.autonomous_note}</div>}
         </Card>}
 
-        <Card title="Road Painting" icon={<Paintbrush className="h-4 w-4 text-amber-400" />} th={th}>
-          <div className={`grid gap-3 ${paintMode === 'dashed' ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            <Select label="Paint Mode" value={paintMode} onChange={setPaintMode} options={['off', 'solid', 'dashed']} th={th} />
-            {paintMode === 'dashed' && <NumberInput label="Dash (m)" value={robot.painting.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ dashLength: value })} th={th} />}
-            {paintMode === 'dashed' && <NumberInput label="Gap (m)" value={robot.painting.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ gapLength: value })} th={th} />}
-          </div>
-          {paintMode !== 'off' && <LinePreview mode={robot.painting.mode} color={robot.painting.color} dash={robot.painting.dashLength} gap={robot.painting.gapLength} />}
-        </Card>
+        <div className="grid gap-3 xl:grid-cols-2">
+          <Card title="Road Painting" icon={<Paintbrush className="h-4 w-4 text-amber-400" />} th={th}>
+            <div className={`grid gap-3 ${paintMode === 'dashed' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              <Select label="Paint Mode" value={paintMode} onChange={setPaintMode} options={['off', 'solid', 'dashed']} th={th} />
+              {paintMode === 'dashed' && <NumberInput label="Dash (m)" value={robot.painting.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ dashLength: value })} th={th} />}
+              {paintMode === 'dashed' && <NumberInput label="Gap (m)" value={robot.painting.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setPainting({ gapLength: value })} th={th} />}
+            </div>
+            {paintMode !== 'off' && <LinePreview mode={robot.painting.mode} color={robot.painting.color} dash={robot.painting.dashLength} gap={robot.painting.gapLength} />}
+          </Card>
 
-        <Card title="Session And Test" icon={<TestTube2 className="h-4 w-4 text-purple-400" />} th={th}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <button type="button" onClick={robot.activeSession ? robot.stopSession : robot.startSession} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${robot.activeSession ? 'border-red-500/40 bg-red-500/15 text-red-300' : th.button}`}>
-              <Save className="h-4 w-4" /> {robot.activeSession ? 'Stop session' : 'Start session'}
-            </button>
-            <button type="button" onClick={startModelTest} className="flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 px-3 py-2 text-xs font-mono text-purple-300">
-              <TestTube2 className="h-4 w-4" /> Test model detection
-            </button>
-            <button type="button" onClick={toggleTestingMode} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${robot.testingMode ? 'border-purple-400 bg-purple-500 text-white' : th.button}`}>
-              {robot.testingMode ? <VideoOff className="h-4 w-4" /> : <Video className="h-4 w-4" />} {robot.testingMode ? 'Stop model test' : 'Test with model'}
-            </button>
-          </div>
-        </Card>
+          <Card title="Session And Test" icon={<TestTube2 className="h-4 w-4 text-purple-400" />} th={th}>
+            <div className="grid grid-cols-1 gap-2">
+              <button type="button" onClick={robot.activeSession ? robot.stopSession : robot.startSession} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${robot.activeSession ? 'border-red-500/40 bg-red-500/15 text-red-300' : th.button}`}>
+                <Save className="h-4 w-4" /> {robot.activeSession ? 'Stop session' : 'Start session'}
+              </button>
+              <button type="button" onClick={startModelTest} className="flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 px-3 py-2 text-xs font-mono text-purple-300">
+                <TestTube2 className="h-4 w-4" /> Test model detection
+              </button>
+              <button type="button" onClick={toggleTestingMode} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${robot.testingMode ? 'border-purple-400 bg-purple-500 text-white' : th.button}`}>
+                {robot.testingMode ? <VideoOff className="h-4 w-4" /> : <Video className="h-4 w-4" />} {robot.testingMode ? 'Stop model test' : 'Test with model'}
+              </button>
+            </div>
+          </Card>
+        </div>
       </section>
 
-      <section className="min-h-0 space-y-4 overflow-y-auto">
+      <section className="min-h-0 space-y-3 overflow-y-auto">
         <Card title="Camera Stream" icon={<Camera className="h-4 w-4 text-amber-400" />} th={th}>
           <CameraPanel
             imageRef={imageRef}
@@ -674,8 +678,8 @@ export function ControlTab() {
 
 function Card({ title, icon, children, th }: { title: string; icon: React.ReactNode; children: React.ReactNode; th: ReturnType<typeof useCards> }) {
   return (
-    <section className={`rounded-xl border p-4 ${th.card}`}>
-      <h3 className={`mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}>{icon}{title}</h3>
+    <section className={`rounded-xl border p-3 ${th.card}`}>
+      <h3 className={`mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}>{icon}{title}</h3>
       {children}
     </section>
   );
@@ -744,28 +748,6 @@ function CameraPanel({ imageRef, videoRef, previewCanvasRef, canvasRef, frame, l
         <span className="text-xs font-mono text-slate-500">{message}</span>
         <span className="text-xs font-mono text-slate-600">The selected model is saved in this browser and restored automatically next time.</span>
       </div>
-      <div className="grid grid-cols-2 gap-2 text-xs font-mono lg:grid-cols-4">
-        <label className="rounded border border-slate-700 p-2">
-          <span className="block text-slate-500">Brightness {imageProcessing.brightness.toFixed(0)}</span>
-          <input className="w-full accent-amber-500" type="range" min={-100} max={100} step={5} value={imageProcessing.brightness} onChange={(event) => onImageProcessing({ enabled: true, brightness: Number(event.target.value) })} />
-        </label>
-        <label className="rounded border border-slate-700 p-2">
-          <span className="block text-slate-500">Contrast {imageProcessing.contrast.toFixed(2)}</span>
-          <input className="w-full accent-amber-500" type="range" min={0.2} max={3} step={0.1} value={imageProcessing.contrast} onChange={(event) => onImageProcessing({ enabled: true, contrast: Number(event.target.value) })} />
-        </label>
-        <label className="rounded border border-slate-700 p-2">
-          <span className="block text-slate-500">Gamma {imageProcessing.gamma.toFixed(2)}</span>
-          <input className="w-full accent-amber-500" type="range" min={0.2} max={3} step={0.1} value={imageProcessing.gamma} onChange={(event) => onImageProcessing({ enabled: true, gamma: Number(event.target.value) })} />
-        </label>
-        <label className="flex items-center justify-between gap-2 rounded border border-slate-700 p-2 text-slate-400">
-          <span>Auto normalize</span>
-          <input type="checkbox" checked={imageProcessing.autoNormalize} onChange={(event) => onImageProcessing({ enabled: true, autoNormalize: event.target.checked })} />
-        </label>
-        <label className="flex items-center justify-between gap-2 rounded border border-slate-700 p-2 text-slate-400">
-          <span>Show processed</span>
-          <input type="checkbox" checked={imageProcessing.showProcessed} onChange={(event) => onImageProcessing({ showProcessed: event.target.checked })} />
-        </label>
-      </div>
     </div>
   );
 }
@@ -779,8 +761,8 @@ function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
   const wpIndex = telemetryNumber(arduinoTelemetry, 'wp_index');
   const wpCount = telemetryNumber(arduinoTelemetry, 'wp_count');
   return (
-    <section className={`rounded-xl border p-4 ${th.card}`}>
-      <h3 className={`mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}><Activity className="h-4 w-4 text-amber-400" />Sensor Strap</h3>
+    <section className={`rounded-xl border p-3 ${th.card}`}>
+      <h3 className={`mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}><Activity className="h-4 w-4 text-amber-400" />Sensor Strap</h3>
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
         <Metric label="Lat" value={gps.lat.toFixed(6)} th={th} />
         <Metric label="Lng" value={gps.lng.toFixed(6)} th={th} />
