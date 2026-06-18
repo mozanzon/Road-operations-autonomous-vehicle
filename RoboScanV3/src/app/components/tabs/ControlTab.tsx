@@ -11,6 +11,8 @@ import { Detection, DetectionStats, drawDetectionOverlay } from '../../lib/yolo'
 import { useRobot, RobotMode } from '../../context/RobotContext';
 import { useTheme } from '../../context/ThemeContext';
 import { DPad } from '../DPad';
+import { useOperatorLocation } from '../../hooks/useOperatorLocation';
+import { getMapTileSource, getPrimaryMapMarker, resolveMapCenter } from '../../lib/mapSettings';
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 
@@ -481,14 +483,14 @@ export function ControlTab() {
       <section className="min-h-0 space-y-4 overflow-y-auto pr-1">
         <Card title="Operation Mode" icon={<Bot className="h-4 w-4 text-amber-400" />} th={th}>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            {modeButton('manual', 'Manual', Gauge)}
+            {modeButton('manual', 'User', Gauge)}
             {modeButton('semi', 'Semi', Route)}
             {modeButton('fully', 'Fully', Navigation)}
           </div>
         </Card>
 
-        {robot.mode === 'manual' && <Card title="Manual Movement" icon={<CircleDot className="h-4 w-4 text-blue-400" />} th={th}>
-          <NumberInput label={`Manual Speed (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.manualSpeed} min={0.05} step={0.05} onChange={robot.setManualSpeed} th={th} />
+        {robot.mode === 'manual' && <Card title="User Movement" icon={<CircleDot className="h-4 w-4 text-blue-400" />} th={th}>
+          <NumberInput label={`User Speed (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.manualSpeed} min={0.05} step={0.05} onChange={robot.setManualSpeed} th={th} />
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className={`flex overflow-hidden rounded-lg border ${th.isDark ? 'border-slate-600' : 'border-slate-300'}`}>
               <button onClick={() => setInputMode('toggle')} className={`px-3 py-1.5 text-xs font-mono ${inputMode === 'toggle' ? 'bg-blue-500 text-white' : th.button}`}>TOGGLE DEFAULT</button>
@@ -516,6 +518,18 @@ export function ControlTab() {
           <button type="button" onClick={robot.addScriptedMove} className={`mt-3 flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${th.button}`}>
             <Plus className="h-4 w-4" /> Add movement step
           </button>
+          <div className={`mt-3 rounded-lg border px-3 py-2 text-xs font-mono ${th.panel}`}>
+            <div className="flex items-center justify-between gap-3">
+              <span className={th.title}>Estimated preview</span>
+              <span className={th.label}>{robot.semiPreview.source === 'scripted-queue' ? 'Queue' : 'Current step'}</span>
+            </div>
+            <div className={`mt-2 grid grid-cols-2 gap-2 ${th.label}`}>
+              <span>Travel: {robot.semiPreview.estimatedTravelMeters.toFixed(1)} m</span>
+              <span>Paint: {robot.semiPreview.estimatedPaintMeters.toFixed(1)} m</span>
+              <span>Start: {robot.semiPreview.usedFallbackStart ? 'Fallback' : 'Live GPS'}</span>
+              <span>Heading end: {robot.semiPreview.finalHeading.toFixed(1)} deg</span>
+            </div>
+          </div>
           <ScriptedMoveList th={th} />
           <div className="mt-4 grid grid-cols-3 gap-2">
             <ActionButton label="Start" icon={<Play className="h-4 w-4" />} onClick={robot.startScriptedMove} color="green" disabled={!isConnected} />
@@ -612,7 +626,7 @@ export function ControlTab() {
               <Maximize2 className="h-4 w-4" />
             </button>
           </div>
-          <WaypointMap height={300} routePositions={routePositions.length ? routePositions : pathPositions} />
+          <WaypointMap height={300} routePositions={routePositions.length ? routePositions : pathPositions} semiPreview={robot.mode === 'semi' ? robot.semiPreview : null} />
         </Card>
       </section>
       </div>
@@ -649,7 +663,7 @@ export function ControlTab() {
               </button>
             </div>
             <div className="min-h-0 flex-1">
-              <WaypointMap height="100%" routePositions={routePositions.length ? routePositions : pathPositions} />
+              <WaypointMap height="100%" routePositions={routePositions.length ? routePositions : pathPositions} semiPreview={robot.mode === 'semi' ? robot.semiPreview : null} />
             </div>
           </div>
         </div>
@@ -757,7 +771,7 @@ function CameraPanel({ imageRef, videoRef, previewCanvasRef, canvasRef, frame, l
 }
 
 function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
-  const { gps, encoders, latency, bridgeStats, arduinoTelemetry, cameraLive, gpsLive, encodersLive, potholeCount, crackCount, testingMode } = useRobot();
+  const { gps, encoders, latency, bridgeStats, arduinoTelemetry, cameraLive, encodersLive, potholeCount, crackCount, testingMode } = useRobot();
   const navActive = telemetryBool(arduinoTelemetry, 'nav_active') || telemetryBool(arduinoTelemetry, 'wp_active');
   const targetDistance = telemetryNumber(arduinoTelemetry, 'target_distance_m');
   const headingError = telemetryNumber(arduinoTelemetry, 'heading_error');
@@ -768,7 +782,6 @@ function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
     <section className={`rounded-xl border p-4 ${th.card}`}>
       <h3 className={`mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}><Activity className="h-4 w-4 text-amber-400" />Sensor Strap</h3>
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
-        <Metric label="GPS" value={gps.fix ? 'FIX' : 'NO FIX'} th={th} error={!gpsLive || !gps.fix} />
         <Metric label="Lat" value={gps.lat.toFixed(6)} th={th} />
         <Metric label="Lng" value={gps.lng.toFixed(6)} th={th} />
         <Metric label="Compass" value={`${gps.heading.toFixed(1)} deg`} th={th} />
@@ -821,31 +834,66 @@ function ScriptedMoveList({ th }: { th: ReturnType<typeof useCards> }) {
   );
 }
 
-function WaypointMap({ height, routePositions }: { height: number | string; routePositions: [number, number][] }) {
-  const { gps, waypoints, addWaypoint, updateWaypoint, deleteWaypoint, clearWaypoints, moveWaypoint, updateWaypointHeading, detections, alignRobotFrontToHeading } = useRobot();
-  const center: [number, number] = gps.fix ? [gps.lat, gps.lng] : EGYPT_CENTER;
+function WaypointMap({ height, routePositions, semiPreview }: { height: number | string; routePositions: [number, number][]; semiPreview: ReturnType<typeof useRobot>['semiPreview'] | null }) {
+  const { gps, waypoints, addWaypoint, updateWaypoint, deleteWaypoint, clearWaypoints, moveWaypoint, updateWaypointHeading, detections, mapLocationSource, alignRobotFrontToHeading } = useRobot();
+  const operatorLocation = useOperatorLocation();
+  const robotPosition: [number, number] = gps.fix ? [gps.lat, gps.lng] : EGYPT_CENTER;
+  const center = resolveMapCenter({
+    source: mapLocationSource,
+    robotPosition: gps.fix ? robotPosition : null,
+    operatorLocation,
+    fallbackCenter: EGYPT_CENTER,
+  });
+  const satelliteTile = getMapTileSource('satellite');
+  const primaryMarker = getPrimaryMapMarker({
+    source: mapLocationSource,
+    robotPosition: gps.fix ? robotPosition : null,
+    operatorLocation,
+  });
   const sorted = [...waypoints].sort((a, b) => a.order - b.order);
   const pathPositions = sorted.map((wp) => [wp.lat, wp.lng] as [number, number]);
   const compassHeading = normalizeHeading(gps.heading);
   const displayHeading = alignRobotFrontToHeading ? compassHeading : gps.heading;
-  const headingEnd = headingVectorEnd(center, displayHeading);
-  const headingSegments = buildHeadingSegments(center, compassHeading, sorted);
-  const renderedRoute = routePositions.length ? [center, ...routePositions] : [center, ...pathPositions];
+  const headingEnd = headingVectorEnd(robotPosition, displayHeading);
+  const headingSegments = buildHeadingSegments(robotPosition, compassHeading, sorted);
+  const renderedRoute = routePositions.length ? [robotPosition, ...routePositions] : [robotPosition, ...pathPositions];
+  const fitPoints = semiPreview?.movementPoints.length
+    ? semiPreview.movementPoints
+    : renderedRoute.length > 1
+      ? renderedRoute
+      : [robotPosition];
   return (
     <div className="relative overflow-hidden rounded-lg border border-slate-700" style={{ height }}>
       <MapContainer center={center} zoom={gps.fix ? 17 : 7} maxZoom={MAX_MAP_ZOOM} zoomSnap={0.25} style={{ height: '100%', width: '100%', background: '#0f172a' }}>
-        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="OpenStreetMap" maxZoom={MAX_MAP_ZOOM} maxNativeZoom={MAX_NATIVE_TILE_ZOOM} />
-        <MapSync center={center} />
+        <TileLayer url={satelliteTile.url} attribution={satelliteTile.attr} maxZoom={MAX_MAP_ZOOM} maxNativeZoom={MAX_NATIVE_TILE_ZOOM} />
+        <MapSync center={center} fitPoints={fitPoints} />
         <MapClick onAdd={addWaypoint} />
-        <Polyline positions={[center, headingEnd]} color="#22d3ee" weight={7} opacity={0.95} />
-        <Marker position={headingEnd} icon={headingArrowIcon(displayHeading)} interactive={false} />
-        <Marker position={center} icon={robotIcon(displayHeading)}>
-          <Popup>
-            Robot: {center[0].toFixed(6)}, {center[1].toFixed(6)}
-            <br />
-            Compass: {compassHeading.toFixed(1)} deg
-          </Popup>
-        </Marker>
+        {primaryMarker?.kind === 'robot' && (
+          <>
+            <Polyline positions={[robotPosition, headingEnd]} color="#22d3ee" weight={7} opacity={0.95} />
+            <Marker position={headingEnd} icon={headingArrowIcon(displayHeading)} interactive={false} />
+            <Marker position={robotPosition} icon={robotIcon(displayHeading)}>
+              <Popup>
+                Robot: {robotPosition[0].toFixed(6)}, {robotPosition[1].toFixed(6)}
+                <br />
+                Compass: {compassHeading.toFixed(1)} deg
+              </Popup>
+            </Marker>
+          </>
+        )}
+        {primaryMarker?.kind === 'operator' && (
+          <Marker position={primaryMarker.position} icon={operatorIcon()}>
+            <Popup>
+              Operator: {primaryMarker.position[0].toFixed(6)}, {primaryMarker.position[1].toFixed(6)}
+            </Popup>
+          </Marker>
+        )}
+        {semiPreview && semiPreview.movementPoints.length >= 2 && (
+          <Polyline positions={semiPreview.movementPoints} color="#22c55e" weight={4} opacity={0.85} dashArray="10 6" />
+        )}
+        {semiPreview?.paintedSegments.map((segment, index) => (
+          <Polyline key={`paint-preview-${index}`} positions={segment} color="#f8fafc" weight={6} opacity={0.95} />
+        ))}
         {renderedRoute.length >= 2 && <Polyline positions={renderedRoute} color="#f59e0b" weight={4} opacity={0.85} dashArray="8 5" />}
         {sorted.map((wp, index) => (
           <Marker
@@ -912,6 +960,24 @@ function WaypointMap({ height, routePositions }: { height: number | string; rout
           ))}
         </div>
       )}
+      {semiPreview && (
+        <div className="absolute top-3 right-3 z-[500] rounded-lg border border-slate-700/60 bg-slate-900/90 px-3 py-2 font-mono text-[11px] text-slate-300 backdrop-blur-sm">
+          <div className="text-[10px] uppercase tracking-wider text-slate-500">Semi preview</div>
+          <div>Travel {semiPreview.estimatedTravelMeters.toFixed(1)} m</div>
+          <div>Paint {semiPreview.estimatedPaintMeters.toFixed(1)} m</div>
+          <div className="text-slate-500">{semiPreview.usedFallbackStart ? 'Estimated from fallback start' : 'Estimated from live GPS'}</div>
+        </div>
+      )}
+      {semiPreview && (
+        <div className="absolute left-3 top-3 z-[500] w-56 rounded-lg border border-slate-700/60 bg-slate-900/90 p-2.5 font-mono text-[11px] text-slate-300 backdrop-blur-sm">
+          <div className="mb-2 text-[10px] uppercase tracking-wider text-slate-500">Paint illustration</div>
+          <SemiPreviewIllustration semiPreview={semiPreview} />
+          <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+            <span>Green dashed: travel</span>
+            <span>White: paint</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -921,11 +987,15 @@ function MapClick({ onAdd }: { onAdd: (lat: number, lng: number) => void }) {
   return null;
 }
 
-function MapSync({ center }: { center: [number, number] }) {
+function MapSync({ center, fitPoints }: { center: [number, number]; fitPoints: [number, number][] }) {
   const map = useMap();
   useEffect(() => {
+    if (fitPoints.length >= 2) {
+      map.fitBounds(fitPoints, { animate: false, padding: [32, 32] });
+      return;
+    }
     map.setView(center, map.getZoom(), { animate: false });
-  }, [center, map]);
+  }, [center, fitPoints, map]);
   return null;
 }
 
@@ -942,6 +1012,15 @@ function headingArrowIcon(heading: number) {
   return L.divIcon({
     className: '',
     html: `<div style="width:36px;height:36px;display:grid;place-items:center;filter:drop-shadow(0 2px 5px rgba(0,0,0,.75))"><svg width="34" height="34" viewBox="0 0 34 34" style="transform:rotate(${heading}deg)"><path d="M17 2 L29 30 L17 24 L5 30 Z" fill="#22d3ee" stroke="white" stroke-width="2"/></svg></div>`,
+    iconSize: [36, 36],
+    iconAnchor: [18, 18],
+  });
+}
+
+function operatorIcon() {
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:36px;height:36px;display:grid;place-items:center;filter:drop-shadow(0 2px 5px rgba(0,0,0,.75))"><svg width="34" height="34" viewBox="0 0 34 34"><path d="M17 2 L29 30 L17 24 L5 30 Z" fill="#8b5cf6" stroke="white" stroke-width="2"/></svg></div>`,
     iconSize: [36, 36],
     iconAnchor: [18, 18],
   });
@@ -964,6 +1043,89 @@ function detectionIcon(type: 'pothole' | 'crack') {
     iconSize: [16, 16],
     iconAnchor: [8, 8],
   });
+}
+
+function SemiPreviewIllustration({ semiPreview }: { semiPreview: ReturnType<typeof useRobot>['semiPreview'] }) {
+  const width = 200;
+  const height = 72;
+  const padding = 8;
+  const bounds = previewBounds([
+    ...semiPreview.movementPoints,
+    ...semiPreview.paintedSegments.flat(),
+  ]);
+  const movementPath = normalizePreviewPath(semiPreview.movementPoints, width, height, padding, bounds);
+  const paintedPaths = semiPreview.paintedSegments
+    .map((segment) => normalizePreviewPath(segment, width, height, padding, bounds))
+    .filter(Boolean);
+
+  return (
+    <div className="overflow-hidden rounded bg-slate-800/90">
+      <svg viewBox={`0 0 ${width} ${height}`} className="block h-16 w-full">
+        <rect x="0" y="0" width={width} height={height} fill="#1e293b" />
+        {movementPath ? (
+          <path
+            d={movementPath}
+            fill="none"
+            stroke="#22c55e"
+            strokeWidth="4"
+            strokeDasharray="10 6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity="0.9"
+          />
+        ) : null}
+        {paintedPaths.map((path, index) => (
+          <path
+            key={`mini-painted-${index}`}
+            d={path}
+            fill="none"
+            stroke="#f8fafc"
+            strokeWidth="6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity="0.98"
+          />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function previewBounds(points: [number, number][]) {
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+  let minLng = Number.POSITIVE_INFINITY;
+  let maxLng = Number.NEGATIVE_INFINITY;
+
+  for (const [lat, lng] of points) {
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+  }
+
+  return { minLat, maxLat, minLng, maxLng };
+}
+
+function normalizePreviewPath(
+  points: [number, number][],
+  width: number,
+  height: number,
+  padding: number,
+  bounds: ReturnType<typeof previewBounds>,
+) {
+  if (points.length < 2) return '';
+  const latRange = Math.max(bounds.maxLat - bounds.minLat, 0.00001);
+  const lngRange = Math.max(bounds.maxLng - bounds.minLng, 0.00001);
+  const scale = Math.min((width - padding * 2) / lngRange, (height - padding * 2) / latRange);
+  const offsetX = (width - lngRange * scale) / 2;
+  const offsetY = (height - latRange * scale) / 2;
+
+  return points.map(([lat, lng], index) => {
+    const x = offsetX + (lng - bounds.minLng) * scale;
+    const y = height - (offsetY + (lat - bounds.minLat) * scale);
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(' ');
 }
 
 function Metric({ label, value, th, error = false }: { label: string; value: string; th: ReturnType<typeof useCards>; error?: boolean }) {

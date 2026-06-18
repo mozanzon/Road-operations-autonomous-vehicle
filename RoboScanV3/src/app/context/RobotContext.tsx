@@ -1,4 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { generateSemiPreview, type SemiPreview } from '../lib/semiPreview';
+import type { MapLocationSource } from '../lib/mapSettings';
+import { useOperatorLocation } from '../hooks/useOperatorLocation';
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'attempting';
 export type RobotMode = 'manual' | 'semi' | 'fully' | 'automatic';
@@ -190,6 +193,7 @@ export interface RobotContextType {
   scriptedMove: ScriptedMove;
   setScriptedMove: (move: Partial<ScriptedMove>) => void;
   scriptedMoves: ScriptedMoveStep[];
+  semiPreview: SemiPreview;
   addScriptedMove: () => void;
   removeScriptedMove: (id: string) => void;
   moveScriptedMove: (id: string, direction: 'up' | 'down') => void;
@@ -231,6 +235,7 @@ export interface RobotContextType {
   batteryWarning: number; setBatteryWarning: (v: number) => void;
   streamTimeout: number; setStreamTimeout: (v: number) => void;
   mapTileSource: string; setMapTileSource: (s: string) => void;
+  mapLocationSource: MapLocationSource; setMapLocationSource: (source: MapLocationSource) => void;
 }
 
 type BridgePayload = {
@@ -284,6 +289,7 @@ type StoredPreferences = {
   compassOffset?: number;
   alignRobotFrontToHeading?: boolean;
   imageProcessing?: Partial<ImageProcessingSettings>;
+  mapLocationSource?: MapLocationSource;
 };
 
 const RobotContext = createContext<RobotContextType>({} as RobotContextType);
@@ -347,13 +353,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [batteryWarning, setBatteryWarning] = useState(20);
   const [streamTimeout, setStreamTimeout] = useState(3);
   const [mapTileSource, setMapTileSource] = useState('osm');
+  const [mapLocationSource, setMapLocationSource] = useState<MapLocationSource>(storedPreferences.mapLocationSource ?? 'robot');
+  const operatorLocation = useOperatorLocation();
 
   const socketRef = useRef<WebSocket | null>(null);
   const connectedAtRef = useRef<number | null>(null);
   const lastMessageAtRef = useRef<number | null>(null);
   const receivedBridgeMessageRef = useRef(false);
   const manualDisconnectRef = useRef(false);
-  const latestRef = useRef({ gps: DEFAULT_GPS, imu: DEFAULT_IMU, encoders: DEFAULT_ENCODERS });
+  const latestRef = useRef({ gps: DEFAULT_GPS, imu: DEFAULT_IMU, encoders: DEFAULT_ENCODERS, mapLocationSource, operatorLocation: null as { lat: number, lng: number } | null });
   const lastManualMotionRef = useRef('');
   const scriptedTimerRef = useRef<number | null>(null);
   const activeSessionRef = useRef<ReportSession | null>(null);
@@ -363,8 +371,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const gpsPausedPlotterRef = useRef(false);
 
   useEffect(() => {
-    latestRef.current = { gps, imu, encoders };
-  }, [gps, imu, encoders]);
+    latestRef.current = { gps, imu, encoders, mapLocationSource, operatorLocation };
+  }, [gps, imu, encoders, mapLocationSource, operatorLocation]);
 
   useEffect(() => {
     activeSessionRef.current = activeSession;
@@ -390,8 +398,9 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       compassOffset,
       alignRobotFrontToHeading,
       imageProcessing,
+      mapLocationSource,
     } satisfies StoredPreferences);
-  }, [alignRobotFrontToHeading, autoTurnSpeed, cameraCalibration, compassOffset, imageProcessing, robotSpeedCap]);
+  }, [alignRobotFrontToHeading, autoTurnSpeed, cameraCalibration, compassOffset, imageProcessing, mapLocationSource, robotSpeedCap]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -985,15 +994,27 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
   const addDetection = useCallback((type: 'pothole' | 'crack', confidence: number, source: Detection['source'] = 'model', pixelBox?: { x: number; y: number; width: number; height: number; frameWidth?: number; frameHeight?: number }) => {
     const snapshot = latestRef.current;
+    
+    // Determine the base location according to the selected view source
+    const useOperator = snapshot.mapLocationSource === 'operator' && snapshot.operatorLocation;
+    const baseLat = useOperator && snapshot.operatorLocation ? snapshot.operatorLocation.lat : snapshot.gps.lat;
+    const baseLng = useOperator && snapshot.operatorLocation ? snapshot.operatorLocation.lng : snapshot.gps.lng;
+    
+    // Use the proxy GPS structure for estimation
+    const proxyGps = { ...snapshot.gps, lat: baseLat, lng: baseLng };
+
     const estimatedGps = type === 'pothole'
-      ? estimateDetectionGps(snapshot.gps, cameraCalibration, pixelBox)
+      ? estimateDetectionGps(proxyGps, cameraCalibration, pixelBox)
       : null;
-    const fallbackPosition = isFiniteGpsCoordinate(snapshot.gps.lat, snapshot.gps.lng)
-      ? { lat: snapshot.gps.lat, lng: snapshot.gps.lng }
+      
+    const fallbackPosition = isFiniteGpsCoordinate(baseLat, baseLng)
+      ? { lat: baseLat, lng: baseLng }
       : { lat: DEFAULT_GPS.lat, lng: DEFAULT_GPS.lng };
+      
     const detectionPosition = estimatedGps && isFiniteGpsCoordinate(estimatedGps.lat, estimatedGps.lng)
       ? estimatedGps
       : fallbackPosition;
+      
     const detection: Detection = {
       id: `det-${Date.now()}`,
       type,
@@ -1099,6 +1120,13 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, [sendCommand]);
 
   const pidHistory = useMemo(() => encoders.errorHistory.map((actual, time) => ({ time, setpoint: 0, actual })), [encoders.errorHistory]);
+  const semiPreview = useMemo(() => generateSemiPreview({
+    gps,
+    fallbackGps: DEFAULT_GPS,
+    scriptedMoves,
+    fallbackMove: { ...scriptedMoveState, id: 'preview-step' },
+    painting,
+  }), [gps, painting, scriptedMoveState, scriptedMoves]);
 
   return (
     <RobotContext.Provider value={{
@@ -1114,7 +1142,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       waypoints, addWaypoint, updateWaypoint, deleteWaypoint, clearWaypoints, moveWaypoint, updateWaypointHeading, importWaypoints,
       pathExecStatus, startPath, pausePath, resumePath, stopPath, resetPath, currentTargetIdx, scriptedStepIdx,
       scriptedMove: scriptedMoveState, setScriptedMove,
-      scriptedMoves, addScriptedMove, removeScriptedMove, moveScriptedMove,
+      scriptedMoves, semiPreview, addScriptedMove, removeScriptedMove, moveScriptedMove,
       startScriptedMove, pauseScriptedMove, resetScriptedMove,
       manualSpeed, setManualSpeed, semiSpeed, setSemiSpeed, autonomousMaxSpeed, setAutonomousMaxSpeed,
       robotSpeedCap, setRobotSpeedCap, autoTurnSpeed, setAutoTurnSpeed,
@@ -1130,7 +1158,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       emergencyStop,
       units, setUnits, gpsThreshold, setGpsThreshold,
       encoderErrorLimit, setEncoderErrorLimit, batteryWarning, setBatteryWarning,
-      streamTimeout, setStreamTimeout, mapTileSource, setMapTileSource,
+      streamTimeout, setStreamTimeout, mapTileSource, setMapTileSource, mapLocationSource, setMapLocationSource,
     }}>
       {children}
     </RobotContext.Provider>

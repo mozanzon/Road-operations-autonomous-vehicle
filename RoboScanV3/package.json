@@ -4,6 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "test": "node --import tsx --test src/**/*.test.ts",
     "build": "vite build",
     "dev": "vite"
   },
@@ -72,6 +73,7 @@
     "@tailwindcss/vite": "4.1.12",
     "@vitejs/plugin-react": "4.7.0",
     "tailwindcss": "4.1.12",
+    "tsx": "^4.22.4",
     "vite": "6.3.5"
   },
   "peerDependencies": {

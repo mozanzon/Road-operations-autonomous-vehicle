@@ -6,6 +6,8 @@ import {
 } from 'react-leaflet';
 import { Download, Upload, Trash2, MapPin } from 'lucide-react';
 import { useRobot } from '../../context/RobotContext';
+import { useOperatorLocation } from '../../hooks/useOperatorLocation';
+import { getMapTileSource, resolveMapCenter } from '../../lib/mapSettings';
 
 // Fix default icon
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -137,17 +139,11 @@ function MapEvents() {
 export function MapTab() {
   const {
     gps, waypoints, updateWaypoint, deleteWaypoint, clearWaypoints, moveWaypoint, updateWaypointHeading, importWaypoints,
-    detections, mapTileSource, alignRobotFrontToHeading,
+    detections, mapTileSource, mapLocationSource, alignRobotFrontToHeading,
   } = useRobot();
+  const operatorLocation = useOperatorLocation();
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const tileSources: Record<string, { url: string; attr: string }> = {
-    osm: { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', attr: '© OpenStreetMap' },
-    satellite: { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr: '© Esri' },
-    topo: { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', attr: '© OpenTopoMap' },
-  };
-
-  const tile = tileSources[mapTileSource] || tileSources.osm;
+  const tile = getMapTileSource(mapTileSource);
   const validDetections = detections.filter((det) => isFiniteGpsCoordinate(det.lat, det.lng));
 
   const exportPath = useCallback(() => {
@@ -175,6 +171,12 @@ export function MapTab() {
 
   const sortedWaypoints = [...waypoints].sort((a, b) => a.order - b.order);
   const robotPosition: [number, number] = [gps.lat, gps.lng];
+  const mapCenter = resolveMapCenter({
+    source: mapLocationSource,
+    robotPosition,
+    operatorLocation,
+    fallbackCenter: robotPosition,
+  });
   const compassHeading = normalizeHeading(gps.heading);
   const displayHeading = alignRobotFrontToHeading ? compassHeading : gps.heading;
   const headingEnd = headingVectorEnd(robotPosition, displayHeading);
@@ -226,7 +228,7 @@ export function MapTab() {
       {/* Map */}
       <div className="flex-1 rounded-xl overflow-hidden border border-slate-700/60 relative" style={{ minHeight: 420 }}>
         <MapContainer
-          center={[gps.lat, gps.lng]}
+          center={mapCenter}
           zoom={16}
           maxZoom={MAX_MAP_ZOOM}
           zoomSnap={0.25}

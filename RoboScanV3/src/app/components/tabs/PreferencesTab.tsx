@@ -2,6 +2,7 @@ import React from 'react';
 import { Settings, Sun, Moon, Ruler, AlertTriangle, Clock, Map, KeyRound, BrainCircuit, Gauge, Camera, Compass } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 import { useRobot } from '../../context/RobotContext';
+import type { MapLocationSource } from '../../lib/mapSettings';
 
 function Section({ title, icon, children, isDark }: {
   title: string; icon: React.ReactNode; children: React.ReactNode; isDark: boolean;
@@ -82,6 +83,7 @@ export function PreferencesTab() {
     batteryWarning, setBatteryWarning,
     streamTimeout, setStreamTimeout,
     mapTileSource, setMapTileSource,
+    mapLocationSource, setMapLocationSource,
     selectedModelPath, setSelectedModelPath,
     tomTomApiKey, setTomTomApiKey,
     robotSpeedCap, setRobotSpeedCap,
@@ -96,6 +98,10 @@ export function PreferencesTab() {
     { value: 'osm',       label: 'OpenStreetMap'   },
     { value: 'satellite', label: 'Satellite (Esri)' },
     { value: 'topo',      label: 'Topographic'      },
+  ];
+  const locationSources: { value: MapLocationSource; label: string; description: string }[] = [
+    { value: 'robot', label: 'Robot GPS', description: 'Center maps on the robot telemetry position' },
+    { value: 'operator', label: 'Operator location', description: 'Center maps on this device geolocation when available' },
   ];
 
   const infoBox = isDark
@@ -256,6 +262,28 @@ export function PreferencesTab() {
             />
           </div>
         </PreferenceRow>
+        <div className="space-y-2">
+          <label className={`text-xs font-mono uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Map Center Source</label>
+          <div className="space-y-2">
+            {locationSources.map((src) => (
+              <label key={src.value} className="flex cursor-pointer items-start gap-3 group">
+                <div className={`mt-0.5 flex h-4 w-4 items-center justify-center rounded-full border-2 transition-colors ${
+                  mapLocationSource === src.value ? 'border-amber-500 bg-amber-500' : isDark ? 'border-slate-500 group-hover:border-slate-400' : 'border-slate-400 group-hover:border-slate-600'
+                }`}>
+                  {mapLocationSource === src.value && <div className="h-1.5 w-1.5 rounded-full bg-slate-900" />}
+                </div>
+                <div className="min-w-0">
+                  <div className={`text-sm font-mono ${
+                    mapLocationSource === src.value ? 'text-amber-500' : isDark ? 'text-slate-400 group-hover:text-slate-300' : 'text-slate-600 group-hover:text-slate-800'
+                  }`}>{src.label}</div>
+                  <div className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>{src.description}</div>
+                </div>
+                <input type="radio" name="mapLocationSource" value={src.value} checked={mapLocationSource === src.value}
+                  onChange={() => setMapLocationSource(src.value)} className="hidden" />
+              </label>
+            ))}
+          </div>
+        </div>
         <div className="space-y-2">
           <label className={`text-xs font-mono uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Map Tile Source</label>
           <div className="space-y-2">
