@@ -44,7 +44,8 @@
     WHEEL RADIUS <m>   set wheel radius used for distance math
 
   Info:
-    STATUS             print current heading, encoders, and plotter mode
+    STATUS             print compact telemetry packet
+    STATUS FULL        print verbose heading, encoder, navigation, and plotter data
     GPS STATUS         print GPS-only status
     GPS ONLY ON/OFF    read and stream GPS data only
     HELP               show commands
@@ -91,8 +92,9 @@ const unsigned long TELEMETRY_INTERVAL_MS = 100;
 const unsigned long NAV_TIMEOUT_MS = 120000;
 
 const int MIN_TURN_PWM = 25;
+const float TURN_IN_PLACE_SPEED_MPS = 0.1;
 const int DEFAULT_DRIVE_SPEED = 160;
-const int DEFAULT_TURN_SPEED = 60;
+const int DEFAULT_TURN_SPEED = 26;
 const int DEFAULT_SPEED_CAP = 102;
 const int DEFAULT_PLOTTER_SPEED = 180;
 const long SERIAL_BAUD_RATE = 115200;
@@ -211,6 +213,61 @@ float compassOffsetDeg = 0.0;
 
 const float DRIVE_HEADING_KP = 1.0;
 const int DRIVE_TRIM_LIMIT = 35;
+
+const char* TK_HEADING = "h";
+const char* TK_COMPASS_RAW = "crh";
+const char* TK_COMPASS_OFFSET = "co";
+const char* TK_COMPASS_OK = "cok";
+const char* TK_LAT = "lat";
+const char* TK_LNG = "lng";
+const char* TK_GPS_FIX = "fix";
+const char* TK_GPS_SPEED = "spd";
+const char* TK_GPS_COURSE = "crs";
+const char* TK_GPS_SAT = "sat";
+const char* TK_GPS_HDOP = "hdop";
+const char* TK_GPS_AGE = "age";
+const char* TK_LEFT_TICKS = "e1";
+const char* TK_RIGHT_TICKS = "e2";
+const char* TK_LEFT_DELTA = "de1";
+const char* TK_RIGHT_DELTA = "de2";
+const char* TK_LEFT_M = "lm";
+const char* TK_RIGHT_M = "rm";
+const char* TK_SPEED = "v";
+const char* TK_LEFT_PWM = "ls";
+const char* TK_RIGHT_PWM = "rs";
+const char* TK_BATTERY = "bat";
+const char* TK_NAV_STATUS = "nav";
+const char* TK_NAV_ACTIVE = "na";
+const char* TK_ARRIVED = "arr";
+const char* TK_TARGET_LAT = "tlat";
+const char* TK_TARGET_LNG = "tlng";
+const char* TK_TARGET_BEARING = "bear";
+const char* TK_TARGET_DISTANCE = "dist";
+const char* TK_WP_ACTIVE = "wpa";
+const char* TK_WP_PAUSED = "wpp";
+const char* TK_WP_EXPECTED = "wpe";
+const char* TK_WP_ERROR = "wperr";
+const char* TK_WP_COUNT = "wpc";
+const char* TK_WP_INDEX = "wp";
+const char* TK_HEADING_ERROR = "herr";
+const char* TK_CORRECTION_TRIM = "trim";
+const char* TK_HEADING_ADJUSTING = "hadj";
+const char* TK_TURN_ACTIVE = "turn";
+const char* TK_ENCODER_ERROR = "et";
+const char* TK_DRIVE_SPEED = "ds";
+const char* TK_ACTIVE_DRIVE_SPEED = "ads";
+const char* TK_TURN_SPEED = "ts";
+const char* TK_AUTO_TURN_SPEED = "ats";
+const char* TK_SPEED_CAP = "cap";
+const char* TK_DRIVE_MOVING = "mov";
+const char* TK_WHEEL_RADIUS = "wr";
+const char* TK_PLOT_MODE = "plot";
+const char* TK_PLOT_SPEED = "ps";
+const char* TK_SPRAYING = "spray";
+const char* TK_DASH_M = "dash";
+const char* TK_GAP_M = "gap";
+const char* TK_PLOT_TARGET = "pt";
+const char* TK_PLOT_DONE = "pd";
 
 void updateGps() {
   while (Serial2.available() > 0) {
@@ -332,12 +389,80 @@ void printNavigationFields() {
   Serial.print(lastRightCommandPwm);
 }
 
+void printCompactSeparator(const char* key) {
+  Serial.print(",");
+  Serial.print(key);
+  Serial.print("=");
+}
+
+void printCompactStatus() {
+  long leftTicks;
+  long rightTicks;
+  readEncoderTicks(leftTicks, rightTicks);
+  float heading = readHeading();
+  bool fix = gpsHasFix();
+
+  Serial.print("ST");
+  printCompactSeparator(TK_HEADING); Serial.print(heading, 2);
+  printCompactSeparator(TK_COMPASS_RAW); Serial.print(lastCompassRawHeadingDeg, 2);
+  printCompactSeparator(TK_COMPASS_OFFSET); Serial.print(compassOffsetDeg, 2);
+  printCompactSeparator(TK_COMPASS_OK); Serial.print(compassOk ? 1 : 0);
+  printCompactSeparator(TK_LAT); Serial.print(fix ? gps.location.lat() : 0.0, 6);
+  printCompactSeparator(TK_LNG); Serial.print(fix ? gps.location.lng() : 0.0, 6);
+  printCompactSeparator(TK_GPS_FIX); Serial.print(fix ? 1 : 0);
+  printCompactSeparator(TK_GPS_SPEED); Serial.print(gps.speed.isValid() ? gps.speed.mps() : 0.0, 3);
+  printCompactSeparator(TK_GPS_COURSE); Serial.print(gps.course.isValid() ? gps.course.deg() : 0.0, 2);
+  printCompactSeparator(TK_GPS_SAT); Serial.print(gps.satellites.isValid() ? gps.satellites.value() : 0);
+  printCompactSeparator(TK_GPS_HDOP); Serial.print(gps.hdop.isValid() ? gps.hdop.hdop() : 999.0, 2);
+  printCompactSeparator(TK_GPS_AGE); Serial.print(gpsAgeMs());
+  printCompactSeparator(TK_LEFT_TICKS); Serial.print(leftTicks);
+  printCompactSeparator(TK_RIGHT_TICKS); Serial.print(rightTicks);
+  printCompactSeparator(TK_LEFT_DELTA); Serial.print(lastSpeedLeftDelta);
+  printCompactSeparator(TK_RIGHT_DELTA); Serial.print(lastSpeedRightDelta);
+  printCompactSeparator(TK_LEFT_M); Serial.print(ticksToMeters(leftTicks), 3);
+  printCompactSeparator(TK_RIGHT_M); Serial.print(ticksToMeters(rightTicks), 3);
+  printCompactSeparator(TK_SPEED); Serial.print(measuredSpeedMps, 3);
+  printCompactSeparator(TK_LEFT_PWM); Serial.print(driveIsMoving ? lastLeftCommandPwm : 0);
+  printCompactSeparator(TK_RIGHT_PWM); Serial.print(driveIsMoving ? lastRightCommandPwm : 0);
+  printCompactSeparator(TK_BATTERY); Serial.print(0);
+  printCompactSeparator(TK_NAV_STATUS); Serial.print(waypointStateName());
+  printCompactSeparator(TK_NAV_ACTIVE); Serial.print(navActive ? 1 : 0);
+  printCompactSeparator(TK_ARRIVED); Serial.print(navArrived ? 1 : 0);
+  printCompactSeparator(TK_TARGET_LAT); Serial.print(navActive ? navTargetLat : 0.0, 6);
+  printCompactSeparator(TK_TARGET_LNG); Serial.print(navActive ? navTargetLng : 0.0, 6);
+  printCompactSeparator(TK_TARGET_BEARING); Serial.print(lastTargetBearingDeg, 2);
+  printCompactSeparator(TK_TARGET_DISTANCE); Serial.print(lastTargetDistanceM, 2);
+  printCompactSeparator(TK_WP_ACTIVE); Serial.print(waypointState == WP_STATE_RUNNING ? 1 : 0);
+  printCompactSeparator(TK_WP_PAUSED); Serial.print(waypointState == WP_STATE_PAUSED ? 1 : 0);
+  printCompactSeparator(TK_WP_EXPECTED); Serial.print(waypointExpectedCount);
+  printCompactSeparator(TK_WP_ERROR);
+  if (waypointError.length()) Serial.print(waypointError);
+  else Serial.print("none");
+  printCompactSeparator(TK_WP_COUNT); Serial.print(waypointCount);
+  printCompactSeparator(TK_WP_INDEX); Serial.print(waypointIndex);
+  printCompactSeparator(TK_HEADING_ERROR); Serial.print(lastHeadingErrorDeg, 2);
+  printCompactSeparator(TK_CORRECTION_TRIM); Serial.print(lastHeadingCorrection);
+  printCompactSeparator(TK_HEADING_ADJUSTING); Serial.print(navHeadingAdjusting ? 1 : 0);
+  printCompactSeparator(TK_TURN_ACTIVE); Serial.print(navTurnActive ? 1 : 0);
+  printCompactSeparator(TK_ENCODER_ERROR); Serial.print(lastEncoderErrorTicks, 2);
+  printCompactSeparator(TK_DRIVE_SPEED); Serial.print(driveSpeed);
+  printCompactSeparator(TK_ACTIVE_DRIVE_SPEED); Serial.print(activeDriveSpeed);
+  printCompactSeparator(TK_TURN_SPEED); Serial.print(turnSpeed);
+  printCompactSeparator(TK_AUTO_TURN_SPEED); Serial.print(autoTurnSpeed);
+  printCompactSeparator(TK_SPEED_CAP); Serial.print(speedCap);
+  printCompactSeparator(TK_DRIVE_MOVING); Serial.print(driveIsMoving ? 1 : 0);
+  printCompactSeparator(TK_WHEEL_RADIUS); Serial.print(wheelRadiusM, 3);
+  printCompactSeparator(TK_PLOT_MODE); Serial.print(plotterModeName());
+  printCompactSeparator(TK_PLOT_SPEED); Serial.print(plotterSpeed);
+  printCompactSeparator(TK_SPRAYING); Serial.print((driveIsMoving && plotterMode != PLOTTER_OFF && !plotDistanceReached) ? 1 : 0);
+  printCompactSeparator(TK_DASH_M); Serial.print(dashPaintDistanceM, 3);
+  printCompactSeparator(TK_GAP_M); Serial.print(dashGapDistanceM, 3);
+  printCompactSeparator(TK_PLOT_TARGET); Serial.print(plotDistanceTargetM, 3);
+  printCompactSeparator(TK_PLOT_DONE); Serial.println(plotDistanceReached ? 1 : 0);
+}
+
 void printGpsStatus() {
-  Serial.print("STATUS");
-  printGpsFields();
-  printNavigationFields();
-  Serial.print("|gps_only=");
-  Serial.println(gpsOnlyMode ? 1 : 0);
+  printCompactStatus();
 }
 
 void onLeftA() {
@@ -1102,7 +1227,7 @@ void updateNavigation() {
   beginForwardMotion(navSpeed);
 }
 
-void printStatus() {
+void printFullStatus() {
   long leftTicks;
   long rightTicks;
   readEncoderTicks(leftTicks, rightTicks);
@@ -1166,8 +1291,7 @@ void printStatus() {
 void printStatusIfDue() {
   if (millis() - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
     lastTelemetryMs = millis();
-    if (gpsOnlyMode) printGpsStatus();
-    else printStatus();
+    printCompactStatus();
   }
 }
 
@@ -1234,7 +1358,7 @@ void turnNinety(int direction) {
       stopDrive();
       Serial.print("ACK:TURN_DONE|heading=");
       Serial.println(currentHeading, 2);
-      printStatus();
+      printCompactStatus();
       return;
     }
 
@@ -1253,7 +1377,7 @@ void turnNinety(int direction) {
     if (averageDelta > expectedTicks * 1.35) {
       stopDrive();
       Serial.println("WARN:TURN_STOPPED_BY_ENCODER_LIMIT");
-      printStatus();
+      printCompactStatus();
       return;
     }
 
@@ -1264,7 +1388,7 @@ void turnNinety(int direction) {
 
   stopDrive();
   Serial.println("WARN:TURN_TIMEOUT");
-  printStatus();
+  printCompactStatus();
 }
 
 void stopAll() {
@@ -1297,7 +1421,8 @@ void printHelp() {
   Serial.println("  PLOT DIST <meters>      plot for distance, 0 = unlimited");
   Serial.println("  PLOT TICKS <ticks>      plot for encoder ticks, 0 = unlimited");
   Serial.println("  WHEEL RADIUS <meters>   set wheel radius for distance math");
-  Serial.println("  STATUS                  print sensor and mode data");
+  Serial.println("  STATUS                  print compact telemetry packet");
+  Serial.println("  STATUS FULL             print verbose sensor and mode data");
   Serial.println("  GPS STATUS              print GPS-only status");
   Serial.println("  GPS ONLY ON/OFF         read and stream GPS data only");
   Serial.println("  HELP                    show this menu");
@@ -1344,11 +1469,11 @@ void handleCommand(String cmd) {
     Serial.print("ACK:SPEED|drive_speed=");
     Serial.println(driveSpeed);
   } else if (cmd.startsWith("TURN SPEED ")) {
-    turnSpeed = cappedDrivePwm(cmd.substring(11).toInt());
+    turnSpeed = DEFAULT_TURN_SPEED;
     Serial.print("ACK:TURN_SPEED|speed=");
     Serial.println(turnSpeed);
   } else if (cmd.startsWith("AUTO TURN SPEED ")) {
-    autoTurnSpeed = cappedDrivePwm(cmd.substring(16).toInt());
+    autoTurnSpeed = DEFAULT_TURN_SPEED;
     Serial.print("ACK:AUTO_TURN_SPEED|speed=");
     Serial.println(autoTurnSpeed);
   } else if (cmd.startsWith("COMPASS OFFSET ")) {
@@ -1488,8 +1613,10 @@ void handleCommand(String cmd) {
     } else {
       Serial.println("ERROR:Wheel_radius_must_be_positive");
     }
+  } else if (cmd == "STATUS FULL") {
+    printFullStatus();
   } else if (cmd == "STATUS") {
-    printStatus();
+    printCompactStatus();
   } else if (cmd == "GPS STATUS") {
     printGpsStatus();
   } else if (cmd == "GPS ONLY ON") {
@@ -1500,7 +1627,7 @@ void handleCommand(String cmd) {
   } else if (cmd == "GPS ONLY OFF") {
     gpsOnlyMode = false;
     Serial.println("ACK:GPS_ONLY|enabled=0");
-    printStatus();
+    printCompactStatus();
   } else if (cmd == "HELP") {
     printHelp();
   } else {

@@ -7,7 +7,7 @@ import {
 import { Download, Upload, Trash2, MapPin } from 'lucide-react';
 import { useRobot } from '../../context/RobotContext';
 import { useOperatorLocation } from '../../hooks/useOperatorLocation';
-import { getMapTileSource, resolveMapCenter } from '../../lib/mapSettings';
+import { getMapTileSource, getPrimaryMapMarker, resolveMapCenter } from '../../lib/mapSettings';
 
 // Fix default icon
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -180,6 +180,11 @@ export function MapTab() {
   const compassHeading = normalizeHeading(gps.heading);
   const displayHeading = alignRobotFrontToHeading ? compassHeading : gps.heading;
   const headingEnd = headingVectorEnd(robotPosition, displayHeading);
+  const primaryMarker = getPrimaryMapMarker({
+    source: mapLocationSource,
+    robotPosition,
+    operatorLocation,
+  });
   const pathPositions = sortedWaypoints
     .map(w => [w.lat, w.lng] as [number, number]);
   const renderedPathPositions = [robotPosition, ...pathPositions];
@@ -238,19 +243,33 @@ export function MapTab() {
           <TileLayer url={tile.url} attribution={tile.attr} maxZoom={MAX_MAP_ZOOM} maxNativeZoom={MAX_NATIVE_TILE_ZOOM} />
           <MapEvents />
 
-          {/* Robot marker */}
-          <Polyline positions={[robotPosition, headingEnd]} color="#22d3ee" weight={7} opacity={0.95} />
-          <Marker position={headingEnd} icon={headingArrowIcon(displayHeading)} interactive={false} />
-          <Marker position={[gps.lat, gps.lng]} icon={robotIcon(displayHeading)}>
-            <Popup>
-              <div className="font-mono text-xs space-y-1">
-                <div><b>Robot Position</b></div>
-                <div>Lat: {gps.lat.toFixed(6)}</div>
-                <div>Lng: {gps.lng.toFixed(6)}</div>
-                <div>Compass: {compassHeading.toFixed(1)}°</div>
-              </div>
-            </Popup>
-          </Marker>
+          {primaryMarker?.kind === 'robot' && (
+            <>
+              <Polyline positions={[robotPosition, headingEnd]} color="#22d3ee" weight={7} opacity={0.95} />
+              <Marker position={headingEnd} icon={headingArrowIcon(displayHeading)} interactive={false} />
+              <Marker position={[gps.lat, gps.lng]} icon={robotIcon(displayHeading)}>
+                <Popup>
+                  <div className="font-mono text-xs space-y-1">
+                    <div><b>Robot Position</b></div>
+                    <div>Lat: {gps.lat.toFixed(6)}</div>
+                    <div>Lng: {gps.lng.toFixed(6)}</div>
+                    <div>Compass: {compassHeading.toFixed(1)}°</div>
+                  </div>
+                </Popup>
+              </Marker>
+            </>
+          )}
+          {primaryMarker?.kind === 'operator' && (
+            <Marker position={primaryMarker.position} icon={headingArrowIcon(0)}>
+              <Popup>
+                <div className="font-mono text-xs space-y-1">
+                  <div><b>Operator Position</b></div>
+                  <div>Lat: {primaryMarker.position[0].toFixed(6)}</div>
+                  <div>Lng: {primaryMarker.position[1].toFixed(6)}</div>
+                </div>
+              </Popup>
+            </Marker>
+          )}
 
           {/* Path polyline */}
           {renderedPathPositions.length >= 2 && (
@@ -259,7 +278,6 @@ export function MapTab() {
               color="#f59e0b"
               weight={3}
               opacity={0.8}
-              dashArray="8 4"
             />
           )}
 

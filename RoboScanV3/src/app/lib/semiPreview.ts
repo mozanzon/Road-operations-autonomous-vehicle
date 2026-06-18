@@ -1,4 +1,4 @@
-import type { GPSData, PaintingState, ScriptedMoveStep } from '../context/RobotContext';
+import type { GPSData, ScriptedMoveStep } from '../context/RobotContext';
 
 type LatLngTuple = [number, number];
 
@@ -19,7 +19,7 @@ type GenerateSemiPreviewInput = {
   fallbackGps: GPSData;
   scriptedMoves: ScriptedMoveStep[];
   fallbackMove: ScriptedMoveStep;
-  painting: PaintingState;
+  painting?: unknown;
 };
 
 type Cursor = {
@@ -28,15 +28,18 @@ type Cursor = {
   heading: number;
 };
 
-const TURN_RADIUS_METERS = 1.5;
-const MIN_ARC_RADIUS_METERS = 1.5;
+type StepSample = [number, number, number];
+type StepResult = {
+  movementSamples: StepSample[];
+  paintedSegments: LatLngTuple[][];
+  end: Cursor;
+};
 
 export function generateSemiPreview({
   gps,
   fallbackGps,
   scriptedMoves,
   fallbackMove,
-  painting,
 }: GenerateSemiPreviewInput): SemiPreview {
   const seedGps = gps.fix ? gps : fallbackGps;
   const start: LatLngTuple = [seedGps.lat, seedGps.lng];
@@ -49,21 +52,24 @@ export function generateSemiPreview({
   const source = scriptedMoves.length > 0 ? 'scripted-queue' as const : 'single-step' as const;
 
   const movementPoints: LatLngTuple[] = [start];
+  const paintedSegments: LatLngTuple[][] = [];
   let estimatedTravelMeters = 0;
 
   for (const move of steps) {
-    const samples = simulateStep(move, cursor);
-    if (samples.length === 0) continue;
-    appendStepSamples(movementPoints, samples);
-    estimatedTravelMeters += measureLine([[cursor.lat, cursor.lng], ...samples.map(([lat, lng]) => [lat, lng] as LatLngTuple)]);
-    const last = samples.at(-1)!;
-    cursor.lat = last[0];
-    cursor.lng = last[1];
-    cursor.heading = last[2];
+    const stepResult = simulateStep(move, cursor);
+    if (stepResult.movementSamples.length > 0) {
+      appendStepSamples(movementPoints, stepResult.movementSamples);
+      estimatedTravelMeters += measureLine([[cursor.lat, cursor.lng], ...stepResult.movementSamples.map(([lat, lng]) => [lat, lng] as LatLngTuple)]);
+    }
+    if (stepResult.paintedSegments.length > 0) {
+      paintedSegments.push(...stepResult.paintedSegments);
+    }
+    cursor.lat = stepResult.end.lat;
+    cursor.lng = stepResult.end.lng;
+    cursor.heading = stepResult.end.heading;
   }
 
   const movementLine = dedupeMovementPoints(movementPoints);
-  const paintedSegments = buildPaintedSegments(movementLine, painting);
   const estimatedPaintMeters = paintedSegments.reduce((total, segment) => total + measureLine(segment), 0);
 
   return {
@@ -79,15 +85,14 @@ export function generateSemiPreview({
   };
 }
 
-type StepSample = [number, number, number];
-
-function simulateStep(move: ScriptedMoveStep, cursor: Cursor): StepSample[] {
-  if (move.movementType === 'turn') return simulateTurn(move, cursor);
-  if (move.movementType === 'arc') return simulateArc(move, cursor);
+function simulateStep(move: ScriptedMoveStep, cursor: Cursor): StepResult {
+  if (move.direction === 'left' || move.direction === 'right') {
+    return simulateTurn(move, cursor);
+  }
   return simulateStraight(move, cursor);
 }
 
-function simulateStraight(move: ScriptedMoveStep, cursor: Cursor): StepSample[] {
+function simulateStraight(move: ScriptedMoveStep, cursor: Cursor): StepResult {
   const signedDistance = move.direction === 'backward' ? -move.distance : move.distance;
   const samples = Math.max(2, Math.ceil(Math.abs(signedDistance) / 1.5));
   const points: StepSample[] = [];
@@ -98,47 +103,39 @@ function simulateStraight(move: ScriptedMoveStep, cursor: Cursor): StepSample[] 
     points.push([point.lat, point.lng, cursor.heading]);
   }
 
-  return points;
+  const paintedSegments = buildStepPaintedSegments(move, cursor, points);
+  const endPoint = points.at(-1);
+  return {
+    movementSamples: points,
+    paintedSegments,
+    end: endPoint
+      ? { lat: endPoint[0], lng: endPoint[1], heading: endPoint[2] }
+      : { ...cursor },
+  };
 }
 
-function simulateTurn(move: ScriptedMoveStep, cursor: Cursor): StepSample[] {
-  const durationSeconds = stepDurationMs(move) / 1000;
-  const signedTravel = (move.direction === 'left' ? -1 : 1) * Math.max(0.05, move.speed) * durationSeconds;
-  return sampleArcFromCursor(cursor, TURN_RADIUS_METERS, signedTravel);
+function simulateTurn(move: ScriptedMoveStep, cursor: Cursor): StepResult {
+  const signedHeadingDelta = move.direction === 'left' ? -90 : 90;
+  return {
+    movementSamples: [],
+    paintedSegments: [],
+    end: {
+      lat: cursor.lat,
+      lng: cursor.lng,
+      heading: normalizeHeading(cursor.heading + signedHeadingDelta),
+    },
+  };
 }
 
-function simulateArc(move: ScriptedMoveStep, cursor: Cursor): StepSample[] {
-  const signedTravel = (move.direction === 'left' ? -1 : 1) * Math.max(0, move.distance);
-  const radius = Math.max(MIN_ARC_RADIUS_METERS, move.distance / 2);
-  return sampleArcFromCursor(cursor, radius, signedTravel);
-}
-
-function sampleArcFromCursor(cursor: Cursor, radiusMeters: number, signedTravelMeters: number): StepSample[] {
-  if (Math.abs(signedTravelMeters) < 0.001) return [];
-  const samples = Math.max(4, Math.ceil(Math.abs(signedTravelMeters) / 1.5));
-  const headingRad = toRadians(cursor.heading);
-  const sign = Math.sign(signedTravelMeters);
-  const rightNormal = headingRad + Math.PI / 2;
-  const center = offsetByBearingRadians(cursor.lat, cursor.lng, rightNormal, sign * radiusMeters);
-  const startBearing = rightNormal + Math.PI;
-  const sweep = signedTravelMeters / radiusMeters;
-  const points: StepSample[] = [];
-
-  for (let index = 1; index <= samples; index += 1) {
-    const fraction = index / samples;
-    const bearing = startBearing + sweep * fraction;
-    const point = offsetByBearingRadians(center.lat, center.lng, bearing, radiusMeters);
-    const heading = normalizeHeading(cursor.heading + toDegrees(sweep * fraction));
-    points.push([point.lat, point.lng, heading]);
+function buildStepPaintedSegments(move: ScriptedMoveStep, cursor: Cursor, movementSamples: StepSample[]): LatLngTuple[][] {
+  if (!move.markingEnabled || move.markingDistance <= 0 || movementSamples.length === 0) return [];
+  const stepLine = [[cursor.lat, cursor.lng], ...movementSamples.map(([lat, lng]) => [lat, lng] as LatLngTuple)];
+  const limitedLine = trimLineToDistance(stepLine, move.markingDistance);
+  if (limitedLine.length < 2) return [];
+  if (move.markingMode === 'dashed') {
+    return dashLine(limitedLine, move.dashLength, move.gapLength);
   }
-
-  return points;
-}
-
-function buildPaintedSegments(movementPoints: LatLngTuple[], painting: PaintingState): LatLngTuple[][] {
-  if (!painting.active || movementPoints.length < 2) return [];
-  if (painting.mode === 'solid') return [movementPoints];
-  return dashLine(movementPoints, painting.dashLength, painting.gapLength);
+  return [limitedLine];
 }
 
 function dashLine(points: LatLngTuple[], dashLength: number, gapLength: number): LatLngTuple[][] {
@@ -191,6 +188,28 @@ function appendStepSamples(points: LatLngTuple[], samples: StepSample[]) {
   }
 }
 
+function trimLineToDistance(points: LatLngTuple[], targetDistance: number): LatLngTuple[] {
+  if (points.length < 2 || targetDistance <= 0) return [];
+  const trimmed: LatLngTuple[] = [points[0]];
+  let remaining = targetDistance;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const segmentDistance = distanceMeters(start, end);
+    if (segmentDistance <= 0) continue;
+    if (remaining >= segmentDistance) {
+      trimmed.push(end);
+      remaining -= segmentDistance;
+      continue;
+    }
+    trimmed.push(interpolatePoint(start, end, remaining / segmentDistance));
+    return trimmed;
+  }
+
+  return trimmed;
+}
+
 function dedupeMovementPoints(points: LatLngTuple[]) {
   return points.filter((point, index) => index === 0 || point[0] !== points[index - 1][0] || point[1] !== points[index - 1][1]);
 }
@@ -208,12 +227,6 @@ function interpolatePoint(start: LatLngTuple, end: LatLngTuple, ratio: number): 
     start[0] + (end[0] - start[0]) * ratio,
     start[1] + (end[1] - start[1]) * ratio,
   ];
-}
-
-function stepDurationMs(step: Pick<ScriptedMoveStep, 'direction' | 'movementType' | 'distance' | 'speed'>) {
-  if (step.direction === 'left' || step.direction === 'right' || step.movementType === 'turn') return 3500;
-  const speed = Math.max(0.05, step.speed);
-  return Math.max(750, Math.min(30000, (step.distance / speed) * 1000));
 }
 
 function offsetByHeading(lat: number, lng: number, headingDeg: number, distanceMetersValue: number) {
@@ -245,10 +258,6 @@ function distanceMeters(start: LatLngTuple | StepSample, end: LatLngTuple | Step
 
 function toRadians(deg: number) {
   return (deg * Math.PI) / 180;
-}
-
-function toDegrees(rad: number) {
-  return (rad * 180) / Math.PI;
 }
 
 function normalizeHeading(value: number) {

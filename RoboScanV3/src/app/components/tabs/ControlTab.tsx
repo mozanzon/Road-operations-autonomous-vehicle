@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, Marker, Polyline, Popup, TileLayer, useMapEvents } from 'react-leaflet';
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, Bot, Camera, CircleDot, ClipboardList, Gauge, MapPinned, Maximize2,
   Navigation, Paintbrush, Pause, Play, Plus, RadioTower, RotateCcw, Route, Save,
@@ -513,9 +513,15 @@ export function ControlTab() {
           <NumberInput label={`Semi Default Speed (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.semiSpeed} min={0.05} step={0.05} onChange={(value) => { robot.setSemiSpeed(value); robot.setScriptedMove({ speed: value }); }} th={th} />
           <div className="grid grid-cols-2 gap-3">
             <Select label="Direction" value={robot.scriptedMove.direction} onChange={(value) => robot.setScriptedMove({ direction: value as any })} options={['forward', 'backward', 'left', 'right']} th={th} />
-            <Select label="Movement" value={robot.scriptedMove.movementType} onChange={(value) => robot.setScriptedMove({ movementType: value as any })} options={['straight', 'turn', 'arc']} th={th} />
-            <NumberInput label="Distance (m)" value={robot.scriptedMove.distance} min={0.1} step={0.1} onChange={(value) => robot.setScriptedMove({ distance: value })} th={th} />
             <NumberInput label="Speed (m/s)" value={robot.scriptedMove.speed} min={0.05} step={0.05} onChange={(value) => robot.setScriptedMove({ speed: value })} th={th} />
+            {(robot.scriptedMove.direction === 'forward' || robot.scriptedMove.direction === 'backward') && (
+              <NumberInput label="Distance (m)" value={robot.scriptedMove.distance} min={0.1} step={0.1} onChange={(value) => robot.setScriptedMove({ distance: value })} th={th} />
+            )}
+            <Select label="Marking" value={robot.scriptedMove.markingEnabled ? 'on' : 'off'} onChange={(value) => robot.setScriptedMove({ markingEnabled: value === 'on' })} options={['on', 'off']} th={th} />
+            <Select label="Mark Mode" value={robot.scriptedMove.markingMode} onChange={(value) => robot.setScriptedMove({ markingMode: value as 'solid' | 'dashed' })} options={['solid', 'dashed']} th={th} />
+            {robot.scriptedMove.markingEnabled && <NumberInput label="Mark Distance (m)" value={robot.scriptedMove.markingDistance} min={0.1} step={0.1} onChange={(value) => robot.setScriptedMove({ markingDistance: value })} th={th} />}
+            {robot.scriptedMove.markingEnabled && robot.scriptedMove.markingMode === 'dashed' && <NumberInput label="Dash (m)" value={robot.scriptedMove.dashLength} min={0.1} step={0.1} onChange={(value) => robot.setScriptedMove({ dashLength: value })} th={th} />}
+            {robot.scriptedMove.markingEnabled && robot.scriptedMove.markingMode === 'dashed' && <NumberInput label="Gap (m)" value={robot.scriptedMove.gapLength} min={0.1} step={0.1} onChange={(value) => robot.setScriptedMove({ gapLength: value })} th={th} />}
           </div>
           <button type="button" onClick={robot.addScriptedMove} className={`mt-3 flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-mono ${th.button}`}>
             <Plus className="h-4 w-4" /> Add movement step
@@ -542,7 +548,7 @@ export function ControlTab() {
 
         {robot.mode === 'fully' && <Card title="Waypoint Autonomous" icon={<MapPinned className="h-4 w-4 text-green-400" />} th={th}>
           <NumberInput label={`Max Speed Limit (m/s, cap ${robot.robotSpeedCap.toFixed(2)})`} value={robot.autonomousMaxSpeed} min={0.05} step={0.05} onChange={robot.setAutonomousMaxSpeed} th={th} />
-          <NumberInput label="Heading Turn Speed (m/s)" value={robot.autoTurnSpeed} min={0.05} step={0.05} onChange={robot.setAutoTurnSpeed} th={th} />
+          <NumberInput label="Heading Turn Speed (m/s)" value={robot.autoTurnSpeed} min={0.1} step={0.1} onChange={robot.setAutoTurnSpeed} th={th} />
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" onClick={robot.clearWaypoints} disabled={sortedWaypoints.length === 0} className={`rounded-lg border px-3 py-2 text-xs font-mono disabled:opacity-40 ${th.button}`}>
               Reset waypoints
@@ -796,8 +802,13 @@ function ScriptedMoveList({ th }: { th: ReturnType<typeof useCards> }) {
         <div key={step.id} className={`grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-lg border p-2 text-xs font-mono ${th.panel}`}>
           <span className="grid h-7 w-7 place-items-center rounded-full bg-amber-500 text-slate-950">{index + 1}</span>
           <div className="min-w-0">
-            <div className={`truncate font-semibold ${th.value}`}>{step.direction} - {step.movementType}</div>
-            <div className={`truncate ${th.label}`}>{step.distance.toFixed(2)} m at {step.speed.toFixed(2)} m/s</div>
+            <div className={`truncate font-semibold ${th.value}`}>{step.direction === 'left' || step.direction === 'right' ? `${step.direction} in place` : `${step.direction} straight`}</div>
+            <div className={`truncate ${th.label}`}>{step.direction === 'left' || step.direction === 'right' ? 'Fixed 90 deg turn at 0.10 m/s' : `${step.distance.toFixed(2)} m at ${step.speed.toFixed(2)} m/s`}</div>
+            <div className={`truncate ${th.label}`}>
+              {step.markingEnabled
+                ? `Mark ${step.markingMode} for ${step.markingDistance.toFixed(2)} m${step.markingMode === 'dashed' ? ` (${step.dashLength.toFixed(2)} / ${step.gapLength.toFixed(2)} m)` : ''}`
+                : 'Move only'}
+            </div>
           </div>
           <div className="flex items-center gap-1">
             <button type="button" onClick={() => moveScriptedMove(step.id, 'up')} disabled={index === 0} className="rounded border border-slate-600 p-1 disabled:opacity-30" title="Move step up">
@@ -839,16 +850,10 @@ function WaypointMap({ height, routePositions, semiPreview }: { height: number |
   const headingEnd = headingVectorEnd(robotPosition, displayHeading);
   const headingSegments = buildHeadingSegments(robotPosition, compassHeading, sorted);
   const renderedRoute = routePositions.length ? [robotPosition, ...routePositions] : [robotPosition, ...pathPositions];
-  const fitPoints = semiPreview?.movementPoints.length
-    ? semiPreview.movementPoints
-    : renderedRoute.length > 1
-      ? renderedRoute
-      : [robotPosition];
   return (
     <div className="relative overflow-hidden rounded-lg border border-slate-700" style={{ height }}>
       <MapContainer center={center} zoom={gps.fix ? 17 : 7} maxZoom={MAX_MAP_ZOOM} zoomSnap={0.25} style={{ height: '100%', width: '100%', background: '#0f172a' }}>
         <TileLayer url={satelliteTile.url} attribution={satelliteTile.attr} maxZoom={MAX_MAP_ZOOM} maxNativeZoom={MAX_NATIVE_TILE_ZOOM} />
-        <MapSync center={center} fitPoints={fitPoints} />
         <MapClick onAdd={addWaypoint} />
         {primaryMarker?.kind === 'robot' && (
           <>
@@ -966,18 +971,6 @@ function WaypointMap({ height, routePositions, semiPreview }: { height: number |
 
 function MapClick({ onAdd }: { onAdd: (lat: number, lng: number) => void }) {
   useMapEvents({ click: (event) => onAdd(event.latlng.lat, event.latlng.lng) });
-  return null;
-}
-
-function MapSync({ center, fitPoints }: { center: [number, number]; fitPoints: [number, number][] }) {
-  const map = useMap();
-  useEffect(() => {
-    if (fitPoints.length >= 2) {
-      map.fitBounds(fitPoints, { animate: false, padding: [32, 32] });
-      return;
-    }
-    map.setView(center, map.getZoom(), { animate: false });
-  }, [center, fitPoints, map]);
   return null;
 }
 

@@ -15,6 +15,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 try:
@@ -33,6 +34,7 @@ import websockets
 DEFAULT_PORTS = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyAMA0", "/dev/ttyAMA10"]
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 ARDUINO_COMMAND_INTERVAL_S = 0.025
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "telemetry_schema.json"
 
 
 logging.basicConfig(
@@ -40,6 +42,19 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger("robot_fast_bridge")
+TURN_IN_PLACE_PWM = 26
+
+
+def load_telemetry_schema():
+    try:
+        return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to load telemetry schema %s: %s", SCHEMA_PATH, exc)
+        return []
+
+
+TELEMETRY_SCHEMA = load_telemetry_schema()
+TELEMETRY_BY_KEY = {field["key"]: field for field in TELEMETRY_SCHEMA}
 
 
 def parse_ports(value):
@@ -57,21 +72,18 @@ def parse_value(value):
         return value
 
 
-def parse_arduino_line(line):
-    if not line.startswith("STATUS|"):
-        if line.startswith("ACK:"):
-            return {"type": "ack", "message": line[4:]}
-        if line.startswith("ERROR:"):
-            return {"type": "error", "message": line[6:]}
-        return None
+def parse_schema_value(value, value_type):
+    if value_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        return text in ("1", "true", "yes", "on")
+    if value_type == "number":
+        return parse_value(str(value))
+    return str(value).strip()
 
-    data = {"type": "status"}
-    for part in line.split("|")[1:]:
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        data[key] = parse_value(value)
 
+def apply_telemetry_aliases(data):
     if "compass_heading" in data:
         data["compassHeading"] = data["compass_heading"]
     if "compass_raw_heading" in data:
@@ -91,7 +103,48 @@ def parse_arduino_line(line):
         data["fix"] = bool(data["gps_fix"])
     if "drive_moving" in data:
         data["moving"] = bool(data["drive_moving"])
+
+    for field in TELEMETRY_SCHEMA:
+        name = field.get("name")
+        if name not in data:
+            continue
+        for alias in field.get("aliases", []):
+            data[alias] = data[name]
     return data
+
+
+def parse_compact_status(line):
+    data = {"type": "status"}
+    for part in line[3:].split(","):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        field = TELEMETRY_BY_KEY.get(key.strip())
+        if field is None:
+            continue
+        data[field["name"]] = parse_schema_value(value, field.get("type", "string"))
+    return apply_telemetry_aliases(data)
+
+
+def parse_arduino_line(line):
+    if line.startswith("ST,"):
+        return parse_compact_status(line)
+
+    if not line.startswith("STATUS|"):
+        if line.startswith("ACK:"):
+            return {"type": "ack", "message": line[4:]}
+        if line.startswith("ERROR:"):
+            return {"type": "error", "message": line[6:]}
+        return None
+
+    data = {"type": "status"}
+    for part in line.split("|")[1:]:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        data[key] = parse_value(value)
+
+    return apply_telemetry_aliases(data)
 
 
 class ArduinoLink:
@@ -327,7 +380,7 @@ class RobotBridge:
                 return []
             if "speed" not in data:
                 return [movement]
-            speed = int(max(0, min(255, int(data.get("speed", 160)))))
+            speed = TURN_IN_PLACE_PWM if action in {"left", "right"} else int(max(0, min(255, int(data.get("speed", 160)))))
             speed_command = f"TURN SPEED {speed}" if action in {"left", "right"} else f"SPEED {speed}"
             return [speed_command, movement]
 
@@ -341,10 +394,10 @@ class RobotBridge:
             return [f"SPEED {int(max(0, min(255, int(data.get('speed', 160)))))}"]
 
         if msg_type == "turn_speed":
-            return [f"TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"]
+            return [f"TURN SPEED {TURN_IN_PLACE_PWM}"]
 
         if msg_type == "auto_turn_speed":
-            return [f"AUTO TURN SPEED {int(max(0, min(255, int(data.get('speed', 70)))))}"]
+            return [f"AUTO TURN SPEED {TURN_IN_PLACE_PWM}"]
 
         if msg_type == "compass_offset":
             degrees = max(-180.0, min(180.0, float(data.get("degrees", 0))))
@@ -377,7 +430,7 @@ class RobotBridge:
                 return []
 
             speed = int(max(0, min(255, int(data.get("maxSpeed", data.get("speed", 160))))))
-            auto_turn_speed = int(max(0, min(255, int(data.get("autoTurnSpeed", 70)))))
+            auto_turn_speed = int(max(0, min(255, int(data.get("autoTurnSpeed", TURN_IN_PLACE_PWM)))))
             speed_cap = int(max(0, min(255, int(data.get("speedCap", 102)))))
             commands = [
                 f"SPEED {speed}",

@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { generateSemiPreview, type SemiPreview } from '../lib/semiPreview';
 import type { MapLocationSource } from '../lib/mapSettings';
+import { parseCompactTelemetry } from '../lib/telemetrySchema';
 import { useOperatorLocation } from '../hooks/useOperatorLocation';
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'attempting';
@@ -8,7 +9,6 @@ export type RobotMode = 'manual' | 'semi' | 'fully' | 'automatic';
 export type PathExecStatus = 'idle' | 'running' | 'paused';
 export type MotionPaintMode = 'move-only' | 'paint';
 export type ScriptDirection = 'forward' | 'backward' | 'left' | 'right';
-export type ScriptMovementType = 'straight' | 'turn' | 'arc';
 
 export interface IMUData {
   roll: number; pitch: number; yaw: number;
@@ -85,8 +85,12 @@ export interface BridgeStats {
 export interface ScriptedMove {
   direction: ScriptDirection;
   distance: number;
-  movementType: ScriptMovementType;
   speed: number;
+  markingEnabled: boolean;
+  markingMode: 'solid' | 'dashed';
+  markingDistance: number;
+  dashLength: number;
+  gapLength: number;
 }
 
 export interface ScriptedMoveStep extends ScriptedMove {
@@ -261,6 +265,7 @@ const BRIDGE_PORT = 8765;
 const MIN_COMMAND_PWM = 1;
 const MAX_COMMAND_PWM = 255;
 const DEFAULT_ROBOT_SPEED_CAP = 0.4;
+const TURN_IN_PLACE_SPEED_MPS = 0.1;
 const POTHOME_DUPLICATE_DISTANCE_M = 2;
 const GPS_GLITCH_DISTANCE_M = 1000;
 const GPS_DEFAULT_REJECT_DISTANCE_M = 50;
@@ -327,7 +332,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [currentTargetIdx, setCurrentTargetIdx] = useState(0);
   const [scriptedStepIdx, setScriptedStepIdx] = useState(0);
   const [robotSpeedCap, setRobotSpeedCapState] = useState(storedPreferences.robotSpeedCap ?? DEFAULT_ROBOT_SPEED_CAP);
-  const [autoTurnSpeed, setAutoTurnSpeedState] = useState(storedPreferences.autoTurnSpeed ?? DEFAULT_ROBOT_SPEED_CAP);
+  const [autoTurnSpeed, setAutoTurnSpeedState] = useState(TURN_IN_PLACE_SPEED_MPS);
   const [cameraCalibration, setCameraCalibrationState] = useState<CameraCalibration>({ ...DEFAULT_CAMERA_CALIBRATION, ...(storedPreferences.cameraCalibration ?? {}) });
   const [compassOffset, setCompassOffsetState] = useState(normalizeSignedDegrees(storedPreferences.compassOffset ?? 0));
   const [alignRobotFrontToHeading, setAlignRobotFrontToHeadingState] = useState(storedPreferences.alignRobotFrontToHeading ?? true);
@@ -335,7 +340,16 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   const [manualSpeed, setManualSpeedState] = useState(DEFAULT_ROBOT_SPEED_CAP);
   const [semiSpeed, setSemiSpeedState] = useState(DEFAULT_ROBOT_SPEED_CAP);
   const [autonomousMaxSpeed, setAutonomousMaxSpeedState] = useState(DEFAULT_ROBOT_SPEED_CAP);
-  const [scriptedMoveState, setScriptedMoveState] = useState<ScriptedMove>({ direction: 'forward', distance: 1, movementType: 'straight', speed: DEFAULT_ROBOT_SPEED_CAP });
+  const [scriptedMoveState, setScriptedMoveState] = useState<ScriptedMove>({
+    direction: 'forward',
+    distance: 1,
+    speed: DEFAULT_ROBOT_SPEED_CAP,
+    markingEnabled: true,
+    markingMode: 'solid',
+    markingDistance: 1,
+    dashLength: 0.5,
+    gapLength: 0.3,
+  });
   const [scriptedMoves, setScriptedMoves] = useState<ScriptedMoveStep[]>([]);
   const [painting, setPaintingState] = useState<PaintingState>({
     active: false, mode: 'solid', dashLength: 0.5, gapLength: 0.3,
@@ -465,16 +479,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setManualSpeedState((prev) => clampSpeed(prev, next));
     setSemiSpeedState((prev) => clampSpeed(prev, next));
     setAutonomousMaxSpeedState((prev) => clampSpeed(prev, next));
-    setAutoTurnSpeedState((prev) => clampSpeed(prev, next));
+    setAutoTurnSpeedState(TURN_IN_PLACE_SPEED_MPS);
     setScriptedMoveState((prev) => ({ ...prev, speed: clampSpeed(prev.speed, next) }));
     sendCommand('speed_cap', { speed: normalizedSpeedToPwm(next) });
   }, [sendCommand]);
 
-  const setAutoTurnSpeed = useCallback((value: number) => {
-    const next = capSpeed(value);
-    setAutoTurnSpeedState(next);
-    sendCommand('auto_turn_speed', { speed: normalizedSpeedToPwm(next) });
-  }, [capSpeed, sendCommand]);
+  const setAutoTurnSpeed = useCallback((_value: number) => {
+    setAutoTurnSpeedState(TURN_IN_PLACE_SPEED_MPS);
+    sendCommand('auto_turn_speed', { speed: normalizedSpeedToPwm(TURN_IN_PLACE_SPEED_MPS) });
+  }, [sendCommand]);
 
   const setManualSpeed = useCallback((value: number) => setManualSpeedState(capSpeed(value)), [capSpeed]);
   const setSemiSpeed = useCallback((value: number) => setSemiSpeedState(capSpeed(value)), [capSpeed]);
@@ -590,7 +603,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    sendCommand('turn_speed', { speed });
+    sendCommand('turn_speed', { speed: normalizedSpeedToPwm(TURN_IN_PLACE_SPEED_MPS) });
     sendCommand('movement', { action: cappedAngular > 0 ? 'left' : 'right' });
   }, [capSpeed, robotSpeedCap, sendCommand]);
 
@@ -799,7 +812,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
           });
         }
       }
-      const arduinoPayload = payload.arduino ?? parseCompactArduinoStatus(payload.raw);
+      const arduinoPayload = payload.arduino ?? parseCompactTelemetry(payload.raw);
       if (arduinoPayload) handleArduinoPayload(arduinoPayload);
       if (payload.frame) {
         setCameraFrame(`data:image/jpeg;base64,${payload.frame}`);
@@ -882,6 +895,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const startPath = useCallback((route?: { points: RoutePoint[]; source: 'tomtom' | 'direct'; maxSpeed: number }) => {
+    if (pathExecStatus === 'running') return;
     const routePoints = route?.points ?? waypoints.map(({ lat, lng }) => ({ lat, lng }));
     if (routePoints.length === 0) return;
     if (!gps.fix) {
@@ -902,7 +916,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       autoTurnSpeed: normalizedSpeedToPwm(autoTurnSpeed),
       speedCap: normalizedSpeedToPwm(robotSpeedCap),
     });
-  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, robotSpeedCap, sendCommand, waypoints]);
+  }, [appendReportEvent, autoTurnSpeed, autonomousMaxSpeed, capSpeed, gps.fix, pathExecStatus, robotSpeedCap, sendCommand, waypoints]);
 
   const pausePath = useCallback(() => {
     setPathExecStatus('paused');
@@ -927,7 +941,17 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
   }, [sendCommand]);
 
   const setScriptedMove = useCallback((move: Partial<ScriptedMove>) => {
-    setScriptedMoveState((prev) => ({ ...prev, ...move, speed: move.speed === undefined ? prev.speed : capSpeed(move.speed) }));
+    setScriptedMoveState((prev) => {
+      const nextDirection = move.direction ?? prev.direction;
+      const isTurn = nextDirection === 'left' || nextDirection === 'right';
+      return {
+        ...prev,
+        ...move,
+        direction: nextDirection,
+        distance: isTurn ? 0 : (move.distance ?? prev.distance),
+        speed: move.speed === undefined ? prev.speed : capSpeed(move.speed),
+      };
+    });
   }, [capSpeed]);
 
   const addScriptedMove = useCallback(() => {
@@ -1181,24 +1205,6 @@ function normalizeBridgeHost(value: string): string {
   return withoutProtocol.replace(new RegExp(`:${BRIDGE_PORT}$`), '').replace(/\/+$/, '');
 }
 
-function parseCompactArduinoStatus(raw: unknown): Record<string, unknown> | null {
-  if (typeof raw !== 'string' || !raw.startsWith('ST,')) return null;
-
-  const parsed: Record<string, unknown> = { type: 'status' };
-  for (const part of raw.slice(3).split(',')) {
-    const [key, value] = part.split('=');
-    if (!key || value === undefined) continue;
-    parsed[key.trim()] = parseCompactValue(value);
-  }
-  return parsed;
-}
-
-function parseCompactValue(value: string): number | string {
-  const trimmed = value.trim();
-  const numeric = Number(trimmed);
-  return trimmed !== '' && Number.isFinite(numeric) ? numeric : trimmed;
-}
-
 function writeStorage(key: string, value: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
@@ -1380,12 +1386,23 @@ function runScriptedStep(
     return;
   }
   const step = steps[index];
-  const speed = normalizedSpeedToPwm(step.speed);
+  const speed = normalizedSpeedToPwm(step.direction === 'left' || step.direction === 'right' ? TURN_IN_PLACE_SPEED_MPS : step.speed);
   setScriptedStepIdx(index);
   sendCommand('stop');
   timerRef.current = window.setTimeout(() => {
     if (step.direction === 'left' || step.direction === 'right') sendCommand('turn_speed', { speed });
     else sendCommand('speed', { speed });
+    if (step.markingEnabled) {
+      if (step.markingMode === 'dashed') {
+        sendCommand('plot', { mode: 'dash_dist', dash_m: step.dashLength, gap_m: step.gapLength });
+        sendCommand('plot', { mode: 'dash' });
+      } else {
+        sendCommand('plot', { mode: 'cont' });
+      }
+      sendCommand('plot', { mode: 'dist', meters: step.markingDistance });
+    } else {
+      sendCommand('plot', { mode: 'off' });
+    }
     sendCommand('movement', { action: step.direction, speed });
     const durationMs = stepDurationMs(step);
     timerRef.current = window.setTimeout(() => runScriptedStep(steps, index + 1, sendCommand, setScriptedStepIdx, setPathExecStatus, timerRef), durationMs);
@@ -1393,7 +1410,7 @@ function runScriptedStep(
 }
 
 function stepDurationMs(step: ScriptedMove): number {
-  if (step.direction === 'left' || step.direction === 'right' || step.movementType === 'turn') return 3500;
+  if (step.direction === 'left' || step.direction === 'right') return 3500;
   const speed = Math.max(0.05, step.speed);
   return Math.max(750, Math.min(30000, (step.distance / speed) * 1000));
 }

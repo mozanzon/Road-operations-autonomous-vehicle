@@ -10,14 +10,14 @@ interface DPadProps {
 }
 
 const LINEAR_SPEED = 1.0;
-const ANGULAR_SPEED = 1.0;
+const TURN_IN_PLACE_SPEED = 0.1;
 
 function dirToVelocity(dir: Direction, speed: number): [number, number] {
   switch (dir) {
     case 'forward':  return [speed * LINEAR_SPEED, 0];
     case 'backward': return [-speed * LINEAR_SPEED, 0];
-    case 'left':     return [0, speed * ANGULAR_SPEED];
-    case 'right':    return [0, -speed * ANGULAR_SPEED];
+    case 'left':     return [0, TURN_IN_PLACE_SPEED];
+    case 'right':    return [0, -TURN_IN_PLACE_SPEED];
     default:         return [0, 0];
   }
 }
