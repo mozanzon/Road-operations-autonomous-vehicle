@@ -35,6 +35,53 @@ DEFAULT_PORTS = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyAMA0", "/dev/ttyAMA10"
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 ARDUINO_COMMAND_INTERVAL_S = 0.025
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "telemetry_schema.json"
+DEFAULT_TELEMETRY_SCHEMA = [
+    {"key": "h", "name": "heading", "type": "number"},
+    {"key": "lat", "name": "lat", "type": "number"},
+    {"key": "lng", "name": "lng", "type": "number"},
+    {"key": "fix", "name": "gps_fix", "type": "boolean"},
+    {"key": "spd", "name": "gps_speed", "type": "number"},
+    {"key": "crs", "name": "gps_course", "type": "number"},
+    {"key": "sat", "name": "gps_sat", "type": "number"},
+    {"key": "hdop", "name": "gps_hdop", "type": "number"},
+    {"key": "age", "name": "gps_age_ms", "type": "number"},
+    {"key": "e1", "name": "e1", "type": "number"},
+    {"key": "e2", "name": "e2", "type": "number"},
+    {"key": "lm", "name": "left_m", "type": "number"},
+    {"key": "rm", "name": "right_m", "type": "number"},
+    {"key": "v", "name": "speed", "type": "number"},
+    {"key": "bat", "name": "battery", "type": "number"},
+    {"key": "mov", "name": "drive_moving", "type": "boolean"},
+    {"key": "ds", "name": "drive_speed", "type": "number"},
+    {"key": "ads", "name": "active_drive_speed", "type": "number"},
+    {"key": "lp", "name": "left_pwm", "type": "number"},
+    {"key": "rp", "name": "right_pwm", "type": "number"},
+    {"key": "nav", "name": "wp_status", "type": "string"},
+    {"key": "na", "name": "nav_active", "type": "boolean"},
+    {"key": "wpa", "name": "wp_active", "type": "boolean"},
+    {"key": "wpp", "name": "wp_paused", "type": "boolean"},
+    {"key": "wpc", "name": "wp_count", "type": "number"},
+    {"key": "wp", "name": "wp_index", "type": "number"},
+    {"key": "tlat", "name": "target_lat", "type": "number"},
+    {"key": "tlng", "name": "target_lng", "type": "number"},
+    {"key": "bear", "name": "target_bearing", "type": "number"},
+    {"key": "dist", "name": "target_distance_m", "type": "number"},
+    {"key": "herr", "name": "heading_error", "type": "number"},
+    {"key": "hadj", "name": "heading_adjusting", "type": "boolean"},
+    {"key": "turn", "name": "turn_active", "type": "boolean"},
+    {"key": "tet", "name": "turn_expected_ticks", "type": "number"},
+    {"key": "et", "name": "encoder_error", "type": "number"},
+    {"key": "ekp", "name": "encoder_pid_kp", "type": "number"},
+    {"key": "eki", "name": "encoder_pid_ki", "type": "number"},
+    {"key": "ekd", "name": "encoder_pid_kd", "type": "number"},
+    {"key": "epo", "name": "encoder_pid_output", "type": "number"},
+    {"key": "plot", "name": "plot_mode", "type": "string"},
+    {"key": "spray", "name": "spraying", "type": "boolean"},
+    {"key": "dash", "name": "dash_m", "type": "number"},
+    {"key": "gap", "name": "gap_m", "type": "number"},
+    {"key": "pt", "name": "plot_target_m", "type": "number"},
+    {"key": "pd", "name": "plot_done", "type": "boolean"},
+]
 
 
 logging.basicConfig(
@@ -49,8 +96,8 @@ def load_telemetry_schema():
     try:
         return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     except Exception as exc:
-        logger.warning("Failed to load telemetry schema %s: %s", SCHEMA_PATH, exc)
-        return []
+        logger.warning("Failed to load telemetry schema %s, using built-in schema: %s", SCHEMA_PATH, exc)
+        return DEFAULT_TELEMETRY_SCHEMA
 
 
 TELEMETRY_SCHEMA = load_telemetry_schema()
@@ -83,36 +130,6 @@ def parse_schema_value(value, value_type):
     return str(value).strip()
 
 
-def apply_telemetry_aliases(data):
-    if "compass_heading" in data:
-        data["compassHeading"] = data["compass_heading"]
-    if "compass_raw_heading" in data:
-        data["compassRawHeading"] = data["compass_raw_heading"]
-    elif "heading" in data:
-        data["compassHeading"] = data["heading"]
-    if "gps_course" in data:
-        data["gpsCourse"] = data["gps_course"]
-    if "gps_heading" in data:
-        data["gpsCourse"] = data["gps_heading"]
-    if "gps_speed" in data:
-        data["gpsSpeed"] = data["gps_speed"]
-    if "gps_hdop" in data:
-        data["hdop"] = data["gps_hdop"]
-        data["accuracy"] = data["gps_hdop"]
-    if "gps_fix" in data:
-        data["fix"] = bool(data["gps_fix"])
-    if "drive_moving" in data:
-        data["moving"] = bool(data["drive_moving"])
-
-    for field in TELEMETRY_SCHEMA:
-        name = field.get("name")
-        if name not in data:
-            continue
-        for alias in field.get("aliases", []):
-            data[alias] = data[name]
-    return data
-
-
 def parse_compact_status(line):
     data = {"type": "status"}
     for part in line[3:].split(","):
@@ -123,7 +140,7 @@ def parse_compact_status(line):
         if field is None:
             continue
         data[field["name"]] = parse_schema_value(value, field.get("type", "string"))
-    return apply_telemetry_aliases(data)
+    return data
 
 
 def parse_arduino_line(line):
@@ -144,7 +161,7 @@ def parse_arduino_line(line):
         key, value = part.split("=", 1)
         data[key] = parse_value(value)
 
-    return apply_telemetry_aliases(data)
+    return data
 
 
 class ArduinoLink:

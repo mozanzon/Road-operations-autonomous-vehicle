@@ -280,7 +280,7 @@ function buildWorkbook(events: ReportEvent[], sessions: ReportSession[], summary
       event.gps.lat,
       event.gps.lng,
       event.gps.heading,
-      valueFromTelemetry(event, 'gps_course') ?? valueFromTelemetry(event, 'gpsCourse'),
+      valueFromTelemetry(event, 'gps_course'),
       event.gps.speed,
       event.gps.accuracy,
       event.imu.roll,

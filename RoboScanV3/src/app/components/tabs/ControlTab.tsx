@@ -763,9 +763,11 @@ function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
   const navActive = telemetryBool(arduinoTelemetry, 'nav_active') || telemetryBool(arduinoTelemetry, 'wp_active');
   const targetDistance = telemetryNumber(arduinoTelemetry, 'target_distance_m');
   const headingError = telemetryNumber(arduinoTelemetry, 'heading_error');
-  const plotterStopped = telemetryBool(arduinoTelemetry, 'plotter_stopped_for_heading');
+  const plotterStopped = telemetryBool(arduinoTelemetry, 'heading_adjusting');
   const wpIndex = telemetryNumber(arduinoTelemetry, 'wp_index');
   const wpCount = telemetryNumber(arduinoTelemetry, 'wp_count');
+  const leftPwm = telemetryNumber(arduinoTelemetry, 'left_pwm');
+  const rightPwm = telemetryNumber(arduinoTelemetry, 'right_pwm');
   return (
     <section className={`rounded-xl border p-3 ${th.card}`}>
       <h3 className={`mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${th.title}`}><Activity className="h-4 w-4 text-amber-400" />Sensor Strap</h3>
@@ -774,7 +776,7 @@ function SensorStrap({ th }: { th: ReturnType<typeof useCards> }) {
         <Metric label="Lng" value={gps.lng.toFixed(6)} th={th} />
         <Metric label="Compass" value={`${gps.heading.toFixed(1)} deg`} th={th} />
         <Metric label="Ticks L/R" value={`${encoders.leftTicks} / ${encoders.rightTicks}`} th={th} error={!encodersLive} />
-        <Metric label="RPM L/R" value={`${encoders.leftRPM.toFixed(1)} / ${encoders.rightRPM.toFixed(1)}`} th={th} />
+        <Metric label="PWM L/R" value={`${leftPwm.toFixed(0)} / ${rightPwm.toFixed(0)}`} th={th} />
         <Metric label="Velocity" value={`${encoders.linearVelocity.toFixed(2)} m/s`} th={th} />
         <Metric label="Latency" value={`${latency.toFixed(0)} ms`} th={th} />
         <Metric label="Camera" value={testingMode ? 'TEST' : cameraLive ? 'LIVE' : 'OFFLINE'} th={th} error={!testingMode && (!cameraLive || Boolean(bridgeStats?.camera_error))} />

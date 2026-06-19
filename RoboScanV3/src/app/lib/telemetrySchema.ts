@@ -6,7 +6,6 @@ type TelemetryField = {
   key: string;
   name: string;
   type: TelemetryFieldType;
-  aliases?: string[];
 };
 
 export type CanonicalTelemetry = Record<string, number | boolean | string> & {
@@ -15,6 +14,7 @@ export type CanonicalTelemetry = Record<string, number | boolean | string> & {
 
 const fields = telemetrySchema as TelemetryField[];
 const fieldsByKey = new Map(fields.map((field) => [field.key, field]));
+export const telemetryFieldNames = new Set(fields.map((field) => field.name));
 
 function parseSchemaValue(value: string, type: TelemetryFieldType): number | boolean | string {
   const trimmed = value.trim();
@@ -24,24 +24,6 @@ function parseSchemaValue(value: string, type: TelemetryFieldType): number | boo
     return trimmed !== '' && Number.isFinite(numeric) ? numeric : 0;
   }
   return trimmed;
-}
-
-function applyAliases(data: CanonicalTelemetry): CanonicalTelemetry {
-  for (const field of fields) {
-    const value = data[field.name];
-    if (value === undefined) continue;
-    for (const alias of field.aliases ?? []) {
-      data[alias] = value;
-    }
-  }
-
-  if (data.heading !== undefined && data.compassHeading === undefined) data.compassHeading = data.heading;
-  if (data.gps_fix !== undefined && data.fix === undefined) data.fix = Boolean(data.gps_fix);
-  if (data.gps_speed !== undefined && data.gpsSpeed === undefined) data.gpsSpeed = data.gps_speed;
-  if (data.gps_course !== undefined && data.gpsCourse === undefined) data.gpsCourse = data.gps_course;
-  if (data.drive_moving !== undefined && data.moving === undefined) data.moving = Boolean(data.drive_moving);
-
-  return data;
 }
 
 export function parseCompactTelemetry(raw: unknown): CanonicalTelemetry | null {
@@ -58,5 +40,16 @@ export function parseCompactTelemetry(raw: unknown): CanonicalTelemetry | null {
     data[field.name] = parseSchemaValue(value, field.type);
   }
 
-  return applyAliases(data);
+  return data;
+}
+
+export function hasCanonicalTelemetryFields(value: unknown): value is CanonicalTelemetry {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as Record<string, unknown>;
+  return fields.some((field) => data[field.name] !== undefined && data[field.name] !== null);
+}
+
+export function selectTelemetryPayload(parsed: unknown, raw: unknown): CanonicalTelemetry | null {
+  if (hasCanonicalTelemetryFields(parsed)) return parsed;
+  return parseCompactTelemetry(raw);
 }

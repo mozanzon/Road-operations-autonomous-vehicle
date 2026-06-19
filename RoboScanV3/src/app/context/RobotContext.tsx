@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { generateSemiPreview, type SemiPreview } from '../lib/semiPreview';
 import type { MapLocationSource } from '../lib/mapSettings';
-import { parseCompactTelemetry } from '../lib/telemetrySchema';
+import { selectTelemetryPayload } from '../lib/telemetrySchema';
 import { useOperatorLocation } from '../hooks/useOperatorLocation';
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'attempting';
@@ -443,15 +443,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       sessionId,
       arduino: telemetry,
       mode,
-      motorMotion: stringFrom(telemetry ?? {}, ['motor_motion', 'motion', 'drive_motion'], inferMotorMotion(telemetry, snapshot.encoders)),
+      motorMotion: inferMotorMotion(telemetry, snapshot.encoders),
       plotMode: stringFrom(telemetry ?? {}, ['plot_mode'], 'OFF'),
-      plotActive: boolFrom(telemetry ?? {}, ['spraying', 'plot_active'], false),
+      plotActive: boolFrom(telemetry ?? {}, ['spraying'], false),
       dashLengthM: numberFrom(telemetry ?? {}, ['dash_m'], painting.dashLength),
       gapLengthM: numberFrom(telemetry ?? {}, ['gap_m'], painting.gapLength),
-      plottedDashedM: numberFrom(telemetry ?? {}, ['plotted_dashed_m'], 0),
-      plottedUndashedM: numberFrom(telemetry ?? {}, ['plotted_undashed_m', 'plot_distance_m'], 0),
-      trackingErrorM: numberFrom(telemetry ?? {}, ['odometryError', 'odometry_error', 'odom_error', 'encoder_error'], snapshot.encoders.odometryError),
-      pathPosition: numberFrom(telemetry ?? {}, ['wp_index', 'path_position'], currentTargetIdx),
+      plottedDashedM: 0,
+      plottedUndashedM: numberFrom(telemetry ?? {}, ['plot_target_m'], 0),
+      trackingErrorM: numberFrom(telemetry ?? {}, ['encoder_error'], snapshot.encoders.odometryError),
+      pathPosition: numberFrom(telemetry ?? {}, ['wp_index'], currentTargetIdx),
       totalMovedDistance: totalDistance,
       ...event,
     }, ...prev].slice(0, 10000));
@@ -633,30 +633,27 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const now = Date.now();
     latestTelemetryRef.current = arduino;
     setArduinoTelemetry(arduino);
-    const hasLat = hasAny(arduino, ['lat', 'latitude', 'gps_lat', 'la']);
-    const hasLng = hasAny(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo']);
+    const hasLat = hasAny(arduino, ['lat']);
+    const hasLng = hasAny(arduino, ['lng']);
     const hasGpsFields = hasAny(arduino, [
-      'lat', 'latitude', 'gps_lat', 'la',
-      'lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo',
-      'fix', 'gps_fix', 'gpsFix', 'g',
-      'gps_speed', 'gpsSpeed', 'gps_course', 'gpsCourse', 'gps_heading', 'gpsHeading', 'gps_hdop', 'hdop',
+      'lat', 'lng', 'gps_fix', 'gps_speed', 'gps_course', 'gps_hdop',
     ]);
-    const hasGpsFix = hasAny(arduino, ['fix', 'gps_fix', 'gpsFix', 'g']);
-    const correctedCompassHeading = numberFrom(arduino, ['compass_heading', 'compassHeading', 'heading', 'compass', 'h'], Number.NaN);
-    const rawCompassHeading = numberFrom(arduino, ['compass_raw_heading', 'compassRawHeading', 'heading_raw'], Number.NaN);
+    const hasGpsFix = hasAny(arduino, ['gps_fix']);
+    const correctedCompassHeading = numberFrom(arduino, ['heading'], Number.NaN);
+    const rawCompassHeading = Number.NaN;
     const heading = Number.isFinite(correctedCompassHeading)
       ? normalizeDegrees(correctedCompassHeading)
       : Number.isFinite(rawCompassHeading)
         ? normalizeDegrees(rawCompassHeading + compassOffset)
         : latestRef.current.gps.heading;
-    const gpsSpeed = numberFrom(arduino, ['gps_speed', 'gpsSpeed'], 0);
-    const moving = boolFrom(arduino, ['drive_moving', 'moving'], false)
-      || Math.abs(numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed', 'v'], gpsSpeed)) > 0.01
+    const gpsSpeed = numberFrom(arduino, ['gps_speed'], 0);
+    const moving = boolFrom(arduino, ['drive_moving'], false)
+      || Math.abs(numberFrom(arduino, ['speed'], gpsSpeed)) > 0.01
       || Math.abs(gpsSpeed) > 0.01;
     const previousGps = latestRef.current.gps;
-    const reportedFix = hasGpsFix ? boolFrom(arduino, ['fix', 'gps_fix', 'gpsFix', 'g'], false) : previousGps.fix;
-    const candidateLat = numberFrom(arduino, ['lat', 'latitude', 'gps_lat', 'la'], Number.NaN);
-    const candidateLng = numberFrom(arduino, ['lng', 'lon', 'longitude', 'gps_lng', 'gps_lon', 'lo'], Number.NaN);
+    const reportedFix = hasGpsFix ? boolFrom(arduino, ['gps_fix'], false) : previousGps.fix;
+    const candidateLat = numberFrom(arduino, ['lat'], Number.NaN);
+    const candidateLng = numberFrom(arduino, ['lng'], Number.NaN);
     const hasCoordinate = hasLat && hasLng && isValidGpsCoordinate(candidateLat, candidateLng);
     const distanceFromLast = hasCoordinate ? distanceMeters(previousGps.lat, previousGps.lng, candidateLat, candidateLng) : 0;
     const candidateLooksDefault = hasCoordinate && distanceMeters(candidateLat, candidateLng, DEFAULT_GPS.lat, DEFAULT_GPS.lng) <= GPS_DEFAULT_REJECT_DISTANCE_M;
@@ -671,10 +668,10 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     setGps({
       lat: acceptedCoordinate ? candidateLat : previousGps.lat,
       lng: acceptedCoordinate ? candidateLng : previousGps.lng,
-      speed: acceptedGpsFix ? numberFrom(arduino, ['gps_speed', 'gpsSpeed'], previousGps.speed) : 0,
+      speed: acceptedGpsFix ? numberFrom(arduino, ['gps_speed'], previousGps.speed) : 0,
       heading,
       fix: acceptedGpsFix,
-      accuracy: acceptedGpsFix ? numberFrom(arduino, ['accuracy', 'gps_accuracy', 'gps_hdop', 'hdop', 'hd'], previousGps.accuracy) : previousGps.accuracy,
+      accuracy: acceptedGpsFix ? numberFrom(arduino, ['gps_hdop'], previousGps.accuracy) : previousGps.accuracy,
       timestamp: acceptedCoordinate ? now : previousGps.timestamp,
     });
     setGpsLive((prev) => hasGpsFields ? acceptedGpsFix : prev);
@@ -707,12 +704,12 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     }));
     setImuLive(hasAny(arduino, ['roll', 'pitch', 'yaw', 'accelX', 'accel_x', 'gyroX', 'gyro_x']));
 
-    const leftTicks = numberFrom(arduino, ['leftTicks', 'left_ticks', 'encoder_left', 'left', 'e1'], 0);
-    const rightTicks = numberFrom(arduino, ['rightTicks', 'right_ticks', 'encoder_right', 'right', 'e2'], 0);
-    const leftRPM = numberFrom(arduino, ['leftRPM', 'left_rpm', 'de1', 'ls'], 0);
-    const rightRPM = numberFrom(arduino, ['rightRPM', 'right_rpm', 'de2', 'rs'], 0);
-    const linearVelocity = numberFrom(arduino, ['linearVelocity', 'linear_velocity', 'velocity', 'speed', 'v'], gpsSpeed);
-    const odometryError = numberFrom(arduino, ['odometryError', 'odometry_error', 'odom_error'], 0);
+    const leftTicks = numberFrom(arduino, ['e1'], 0);
+    const rightTicks = numberFrom(arduino, ['e2'], 0);
+    const leftRPM = 0;
+    const rightRPM = 0;
+    const linearVelocity = numberFrom(arduino, ['speed'], gpsSpeed);
+    const odometryError = numberFrom(arduino, ['encoder_error'], 0);
     setEncoders((prev) => ({
       leftTicks,
       rightTicks,
@@ -723,14 +720,14 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
       errorHistory: [...prev.errorHistory.slice(-59), odometryError],
       timestamp: now,
     }));
-    setEncodersLive(hasAny(arduino, ['leftTicks', 'left_ticks', 'rightTicks', 'right_ticks', 'leftRPM', 'rightRPM', 'linearVelocity', 'e1', 'e2', 'de1', 'de2', 'ls', 'rs', 'v']));
-    setBattery(numberFrom(arduino, ['battery', 'battery_percent', 'batteryLevel'], battery));
-    setHostname(stringFrom(arduino, ['hostname', 'host'], hostname));
-    setTotalDistance(numberFrom(arduino, ['totalDistance', 'total_distance'], numberFrom(arduino, ['left_m', 'right_m'], totalDistance)));
-    setSegmentDistance(numberFrom(arduino, ['segmentDistance', 'segment_distance', 'plot_distance_m', 'pd', 'plot_target_m', 'pt'], segmentDistance));
+    setEncodersLive(hasAny(arduino, ['e1', 'e2', 'speed', 'encoder_error']));
+    setBattery(numberFrom(arduino, ['battery'], battery));
+    setHostname(stringFrom(arduino, ['hostname'], hostname));
+    setTotalDistance(numberFrom(arduino, ['left_m', 'right_m'], totalDistance));
+    setSegmentDistance(numberFrom(arduino, ['plot_target_m'], segmentDistance));
     if (hasAny(arduino, ['wp_index'])) setCurrentTargetIdx(numberFrom(arduino, ['wp_index'], currentTargetIdx));
     const waypointCount = numberFrom(arduino, ['wp_count'], 0);
-    const routeStatus = stringFrom(arduino, ['wp_status', 'route_status'], '').toLowerCase();
+    const routeStatus = stringFrom(arduino, ['wp_status'], '').toLowerCase();
     if (boolFrom(arduino, ['wp_paused'], false) || routeStatus === 'paused') {
       setPathExecStatus('paused');
     } else if (boolFrom(arduino, ['nav_active', 'wp_active'], false) || routeStatus === 'running') {
@@ -812,7 +809,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
           });
         }
       }
-      const arduinoPayload = payload.arduino ?? parseCompactTelemetry(payload.raw);
+      const arduinoPayload = selectTelemetryPayload(payload.arduino, payload.raw);
       if (arduinoPayload) handleArduinoPayload(arduinoPayload);
       if (payload.frame) {
         setCameraFrame(`data:image/jpeg;base64,${payload.frame}`);
@@ -1333,7 +1330,7 @@ function readJsonArray<T>(key: string): T[] {
 }
 
 function inferMotorMotion(telemetry: Record<string, unknown> | null, encoders: EncoderData): string {
-  if (boolFrom(telemetry ?? {}, ['drive_moving', 'moving'], false)) return 'moving';
+  if (boolFrom(telemetry ?? {}, ['drive_moving'], false)) return 'moving';
   if (Math.abs(encoders.linearVelocity) > 0.01) return 'moving';
   return 'stopped';
 }
